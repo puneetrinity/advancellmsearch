@@ -1,0 +1,29 @@
+# docker/prometheus.yml
+"""
+Prometheus configuration for monitoring
+"""
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  - job_name: 'ai-search-api'
+    static_configs:
+      - targets: ['ai-search-api:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+
+  - job_name: 'ollama'
+    static_configs:
+      - targets: ['ollama:11434']
+
+---
