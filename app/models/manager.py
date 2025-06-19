@@ -1,487 +1,739 @@
-# app/models/manager.py
 """
-Model Manager - Handles all model operations and lifecycle
-Manages Ollama local models with intelligent loading/unloading
+ModelManager - Intelligent model lifecycle management with cost optimization.
+Handles model loading, selection, fallbacks, and performance tracking.
 """
-
 import asyncio
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Set
+from dataclasses import dataclass, field
 from enum import Enum
 
-import aiohttp
-import structlog
-from pydantic import BaseModel
-
-from app.core.config import get_settings, MODEL_ASSIGNMENTS, PRIORITY_TIERS, API_COSTS
-from app.cache.redis_client import CacheManager
-
-logger = structlog.get_logger(__name__)
+from app.models.ollama_client import OllamaClient, ModelResult, ModelStatus, OllamaException
+from app.core.logging import get_logger, get_correlation_id, log_performance
+from app.core.config import get_settings
 
 
-class ModelStatus(Enum):
-    """Model status enumeration"""
-    UNLOADED = "unloaded"
-    LOADING = "loading"
-    LOADED = "loaded"
-    WARMING = "warming"
-    READY = "ready"
-    ERROR = "error"
+logger = get_logger("models.manager")
+settings = get_settings()
 
 
-@dataclass
-class ModelResult:
-    """Result from model generation"""
-    success: bool
-    text: str = ""
-    cost: float = 0.0
-    execution_time: float = 0.0
-    model_used: str = ""
-    error: Optional[str] = None
-    metadata: Dict[str, Any] = None
-    
-    def __post_init__(self):
-        if self.metadata is None:
-            self.metadata = {}
+class TaskType(str, Enum):
+    """Task types for model selection."""
+    SIMPLE_CLASSIFICATION = "simple_classification"
+    QA_AND_SUMMARY = "qa_and_summary"
+    ANALYTICAL_REASONING = "analytical_reasoning"
+    DEEP_RESEARCH = "deep_research"
+    CODE_TASKS = "code_tasks"
+    MULTILINGUAL = "multilingual"
+    CREATIVE_WRITING = "creative_writing"
+    CONVERSATION = "conversation"
+
+
+class QualityLevel(str, Enum):
+    """Quality requirements for model selection."""
+    MINIMAL = "minimal"      # Fastest response, basic quality
+    BALANCED = "balanced"    # Good balance of speed and quality
+    HIGH = "high"           # High quality, reasonable speed
+    PREMIUM = "premium"     # Best quality, may be slower/expensive
 
 
 @dataclass
 class ModelInfo:
-    """Information about a model"""
+    """Information about a model including performance metrics."""
     name: str
-    status: ModelStatus
-    last_used: datetime
+    status: ModelStatus = ModelStatus.UNKNOWN
+    last_used: datetime = field(default_factory=datetime.now)
     load_time: float = 0.0
     total_requests: int = 0
     total_cost: float = 0.0
     avg_response_time: float = 0.0
-    memory_usage: float = 0.0
-    tier: str = "T2"
+    avg_tokens_per_second: float = 0.0
+    memory_usage_mb: float = 0.0
+    tier: str = "T2"  # T0=always loaded, T1=keep warm, T2=load on demand
+    success_rate: float = 1.0
+    confidence_scores: List[float] = field(default_factory=list)
     
-    def update_stats(self, execution_time: float, cost: float):
-        """Update model statistics"""
-        self.last_used = datetime.now()
+    def update_stats(self, result: ModelResult, confidence: float = 0.0):
+        """Update model performance statistics."""
         self.total_requests += 1
-        self.total_cost += cost
+        self.last_used = datetime.now()
         
-        # Update average response time
-        if self.avg_response_time == 0:
-            self.avg_response_time = execution_time
+        if result.success:
+            # Update response time (exponential moving average)
+            alpha = 0.1
+            if self.avg_response_time == 0:
+                self.avg_response_time = result.execution_time
+            else:
+                self.avg_response_time = (alpha * result.execution_time + 
+                                        (1 - alpha) * self.avg_response_time)
+            
+            # Update tokens per second
+            if result.tokens_per_second:
+                if self.avg_tokens_per_second == 0:
+                    self.avg_tokens_per_second = result.tokens_per_second
+                else:
+                    self.avg_tokens_per_second = (alpha * result.tokens_per_second + 
+                                                (1 - alpha) * self.avg_tokens_per_second)
+            
+            # Track confidence scores
+            if confidence > 0:
+                self.confidence_scores.append(confidence)
+                # Keep only last 100 scores
+                if len(self.confidence_scores) > 100:
+                    self.confidence_scores = self.confidence_scores[-100:]
+        
+        # Update success rate
+        recent_requests = min(self.total_requests, 20)  # Consider last 20 requests
+        if hasattr(self, '_recent_successes'):
+            self._recent_successes.append(result.success)
+            if len(self._recent_successes) > recent_requests:
+                self._recent_successes = self._recent_successes[-recent_requests:]
         else:
-            self.avg_response_time = (
-                (self.avg_response_time * (self.total_requests - 1) + execution_time) 
-                / self.total_requests
-            )
-
-
-class OllamaClient:
-    """Async client for Ollama API"""
-    
-    def __init__(self, host: str, timeout: int = 60):
-        self.host = host.rstrip('/')
-        self.timeout = timeout
-        self.session: Optional[aiohttp.ClientSession] = None
-    
-    async def initialize(self):
-        """Initialize the HTTP session"""
-        self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=self.timeout)
-        )
-    
-    async def cleanup(self):
-        """Cleanup resources"""
-        if self.session:
-            await self.session.close()
-    
-    async def list_models(self) -> List[Dict[str, Any]]:
-        """List available models"""
-        try:
-            async with self.session.get(f"{self.host}/api/tags") as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data.get("models", [])
-                else:
-                    logger.error(f"Failed to list models: {response.status}")
-                    return []
-        except Exception as e:
-            logger.error(f"Error listing models: {e}")
-            return []
-    
-    async def pull_model(self, model_name: str) -> bool:
-        """Pull a model from registry"""
-        try:
-            payload = {"name": model_name}
-            async with self.session.post(
-                f"{self.host}/api/pull", 
-                json=payload
-            ) as response:
-                if response.status == 200:
-                    # Stream the pull progress (simplified)
-                    async for line in response.content:
-                        if line:
-                            # Log progress (could be enhanced with progress tracking)
-                            pass
-                    return True
-                else:
-                    logger.error(f"Failed to pull model {model_name}: {response.status}")
-                    return False
-        except Exception as e:
-            logger.error(f"Error pulling model {model_name}: {e}")
-            return False
-    
-    async def generate(
-        self, 
-        model_name: str, 
-        prompt: str, 
-        max_tokens: int = 300,
-        temperature: float = 0.7,
-        stop: Optional[List[str]] = None
-    ) -> ModelResult:
-        """Generate text using a model"""
-        start_time = time.time()
+            self._recent_successes = [result.success]
         
-        try:
-            payload = {
-                "model": model_name,
-                "prompt": prompt,
-                "options": {
-                    "num_predict": max_tokens,
-                    "temperature": temperature,
-                    "stop": stop or []
-                },
-                "stream": False
-            }
-            
-            async with self.session.post(
-                f"{self.host}/api/generate",
-                json=payload
-            ) as response:
-                execution_time = time.time() - start_time
-                
-                if response.status == 200:
-                    data = await response.json()
-                    
-                    return ModelResult(
-                        success=True,
-                        text=data.get("response", ""),
-                        cost=API_COSTS.get(model_name, 0.0),
-                        execution_time=execution_time,
-                        model_used=model_name,
-                        metadata={
-                            "total_duration": data.get("total_duration", 0),
-                            "load_duration": data.get("load_duration", 0),
-                            "prompt_eval_count": data.get("prompt_eval_count", 0),
-                            "eval_count": data.get("eval_count", 0)
-                        }
-                    )
-                else:
-                    error_text = await response.text()
-                    return ModelResult(
-                        success=False,
-                        error=f"Model generation failed: {response.status} - {error_text}",
-                        execution_time=execution_time,
-                        model_used=model_name
-                    )
-                    
-        except asyncio.TimeoutError:
-            execution_time = time.time() - start_time
-            return ModelResult(
-                success=False,
-                error=f"Model generation timed out after {self.timeout}s",
-                execution_time=execution_time,
-                model_used=model_name
-            )
-        except Exception as e:
-            execution_time = time.time() - start_time
-            return ModelResult(
-                success=False,
-                error=f"Model generation error: {str(e)}",
-                execution_time=execution_time,
-                model_used=model_name
-            )
+        self.success_rate = sum(self._recent_successes) / len(self._recent_successes)
     
-    async def check_model_status(self, model_name: str) -> bool:
-        """Check if a model is loaded and ready"""
-        try:
-            # Try a simple generation to check if model is ready
-            payload = {
-                "model": model_name,
-                "prompt": "test",
-                "options": {"num_predict": 1},
-                "stream": False
-            }
-            
-            async with self.session.post(
-                f"{self.host}/api/generate",
-                json=payload
-            ) as response:
-                return response.status == 200
-                
-        except Exception:
-            return False
+    @property
+    def avg_confidence(self) -> float:
+        """Calculate average confidence score."""
+        if not self.confidence_scores:
+            return 0.0
+        return sum(self.confidence_scores) / len(self.confidence_scores)
+    
+    @property
+    def performance_score(self) -> float:
+        """Calculate overall performance score (0-1)."""
+        # Weighted combination of metrics
+        speed_score = min(1.0, 10.0 / max(self.avg_response_time, 0.1))  # 10s = 0 score
+        quality_score = self.avg_confidence
+        reliability_score = self.success_rate
+        
+        return (0.4 * speed_score + 0.3 * quality_score + 0.3 * reliability_score)
 
 
 class ModelManager:
-    """Manages model lifecycle and selection"""
+    """
+    Intelligent model lifecycle manager with optimization and fallback strategies.
     
-    def __init__(self, ollama_host: str, cache_manager: Optional[CacheManager] = None):
-        self.settings = get_settings()
-        self.ollama_client = OllamaClient(ollama_host, self.settings.ollama_timeout)
+    Features:
+    - Smart model selection based on task type and quality requirements
+    - Automatic model loading and unloading based on usage patterns
+    - Performance tracking and optimization recommendations
+    - Fallback strategies for model failures
+    - Cost optimization and budget management
+    """
+    
+    def __init__(
+        self,
+        ollama_host: str = "http://localhost:11434",
+        cache_manager = None  # Optional cache manager for storing metrics
+    ):
+        self.ollama_client = OllamaClient(base_url=ollama_host)
         self.cache_manager = cache_manager
         
-        # Model registry
+        # Model registry and performance tracking
         self.models: Dict[str, ModelInfo] = {}
-        self.loaded_models: Dict[str, datetime] = {}
-        
-        # Performance tracking
-        self.total_requests = 0
-        self.total_cost = 0.0
-        self.local_requests = 0
-        
-        # Model loading locks
+        self.loaded_models: Set[str] = set()
         self._loading_locks: Dict[str, asyncio.Lock] = {}
-    
-    async def initialize(self):
-        """Initialize the model manager"""
-        await self.ollama_client.initialize()
         
-        # Initialize model registry
-        await self._initialize_model_registry()
+        # Model assignment configuration
+        self.model_assignments = {
+            TaskType.SIMPLE_CLASSIFICATION: "phi:mini",
+            TaskType.QA_AND_SUMMARY: "llama2:7b",
+            TaskType.ANALYTICAL_REASONING: "mistral:7b",
+            TaskType.DEEP_RESEARCH: "llama2:13b",
+            TaskType.CODE_TASKS: "codellama",
+            TaskType.MULTILINGUAL: "aya:8b",
+            TaskType.CREATIVE_WRITING: "llama2:7b",
+            TaskType.CONVERSATION: "llama2:7b"
+        }
         
-        logger.info("Model manager initialized", models=list(self.models.keys()))
+        # Priority tiers for memory management
+        self.priority_tiers = {
+            "T0": ["phi:mini"],  # Always loaded
+            "T1": ["llama2:7b"],  # Keep warm
+            "T2": ["llama2:13b", "mistral:7b", "codellama", "aya:8b"]  # Load on demand
+        }
+        
+        # Quality-based model overrides
+        self.quality_overrides = {
+            QualityLevel.MINIMAL: {
+                TaskType.QA_AND_SUMMARY: "phi:mini",
+                TaskType.ANALYTICAL_REASONING: "llama2:7b",
+                TaskType.DEEP_RESEARCH: "llama2:7b"
+            },
+            QualityLevel.PREMIUM: {
+                TaskType.SIMPLE_CLASSIFICATION: "llama2:7b",
+                TaskType.QA_AND_SUMMARY: "mistral:7b",
+                TaskType.ANALYTICAL_REASONING: "llama2:13b"
+            }
+        }
+        
+        logger.info(
+            "ModelManager initialized",
+            ollama_host=ollama_host,
+            model_assignments=len(self.model_assignments),
+            correlation_id=get_correlation_id()
+        )
     
-    async def cleanup(self):
-        """Cleanup resources"""
-        await self.ollama_client.cleanup()
-    
-    async def _initialize_model_registry(self):
-        """Initialize the model registry with available models"""
+    async def initialize(self) -> None:
+        """Initialize the model manager and load priority models."""
+        correlation_id = get_correlation_id()
+        
+        logger.info("Initializing ModelManager", correlation_id=correlation_id)
+        
         try:
-            # Get available models from Ollama
-            available_models = await self.ollama_client.list_models()
-            available_names = [model["name"] for model in available_models]
+            # Initialize Ollama client
+            await self.ollama_client.initialize()
             
-            # Initialize model info for all expected models
-            for assignment_type, model_name in MODEL_ASSIGNMENTS.items():
-                tier = self._get_model_tier(model_name)
-                
-                self.models[model_name] = ModelInfo(
-                    name=model_name,
-                    status=ModelStatus.LOADED if model_name in available_names else ModelStatus.UNLOADED,
-                    last_used=datetime.now() - timedelta(hours=1),  # Default to 1 hour ago
-                    tier=tier
-                )
-                
-                # Create loading lock
-                self._loading_locks[model_name] = asyncio.Lock()
+            # Check Ollama health
+            if not await self.ollama_client.health_check():
+                logger.error("Ollama service is not healthy", correlation_id=correlation_id)
+                raise OllamaException("Ollama service is not available")
+            
+            # Load available models from Ollama
+            await self._discover_models()
+            
+            # Preload T0 models (always loaded)
+            await self._preload_priority_models()
             
             logger.info(
-                "Model registry initialized",
+                "ModelManager initialization completed",
                 total_models=len(self.models),
-                loaded_models=len([m for m in self.models.values() if m.status == ModelStatus.LOADED])
+                loaded_models=len(self.loaded_models),
+                correlation_id=correlation_id
             )
             
         except Exception as e:
-            logger.error(f"Failed to initialize model registry: {e}")
+            logger.error(
+                "ModelManager initialization failed",
+                error=str(e),
+                correlation_id=correlation_id,
+                exc_info=True
+            )
             raise
     
-    def _get_model_tier(self, model_name: str) -> str:
-        """Get the tier for a model"""
-        for tier, models in PRIORITY_TIERS.items():
-            if model_name in models:
-                return tier
-        return "T2"  # Default to lowest priority
-    
-    async def preload_models(self, model_names: List[str]):
-        """Preload critical models"""
-        for model_name in model_names:
-            try:
-                await self._ensure_model_loaded(model_name)
-                logger.info(f"Preloaded model: {model_name}")
-            except Exception as e:
-                logger.error(f"Failed to preload model {model_name}: {e}")
-    
-    async def _ensure_model_loaded(self, model_name: str) -> bool:
-        """Ensure a model is loaded and ready"""
-        if model_name not in self.models:
-            logger.error(f"Unknown model: {model_name}")
-            return False
+    @log_performance("model_discovery")
+    async def _discover_models(self) -> None:
+        """Discover available models and initialize model info."""
+        correlation_id = get_correlation_id()
         
-        model_info = self.models[model_name]
-        
-        # If already loaded and ready, return
-        if model_info.status == ModelStatus.READY:
-            return True
-        
-        # Use lock to prevent concurrent loading
-        async with self._loading_locks[model_name]:
-            # Check again in case another coroutine loaded it
-            if model_info.status == ModelStatus.READY:
-                return True
+        try:
+            available_models = await self.ollama_client.list_models()
             
-            try:
-                model_info.status = ModelStatus.LOADING
-                start_time = time.time()
+            for model_data in available_models:
+                model_name = model_data.get("name", "unknown")
                 
-                # Check if model exists locally
-                available_models = await self.ollama_client.list_models()
-                available_names = [model["name"] for model in available_models]
+                # Determine tier based on configuration
+                tier = "T2"  # Default
+                for tier_name, tier_models in self.priority_tiers.items():
+                    if any(model_name.startswith(tm.split(':')[0]) for tm in tier_models):
+                        tier = tier_name
+                        break
                 
-                if model_name not in available_names:
-                    logger.info(f"Pulling model {model_name}...")
-                    success = await self.ollama_client.pull_model(model_name)
-                    if not success:
-                        model_info.status = ModelStatus.ERROR
-                        return False
-                
-                # Test if model is ready
-                is_ready = await self.ollama_client.check_model_status(model_name)
-                
-                if is_ready:
-                    load_time = time.time() - start_time
-                    model_info.status = ModelStatus.READY
-                    model_info.load_time = load_time
-                    self.loaded_models[model_name] = datetime.now()
-                    
-                    logger.info(
-                        f"Model {model_name} loaded successfully",
-                        load_time=load_time
-                    )
-                    return True
-                else:
-                    model_info.status = ModelStatus.ERROR
-                    logger.error(f"Model {model_name} failed to load properly")
-                    return False
-                    
-            except Exception as e:
-                model_info.status = ModelStatus.ERROR
-                logger.error(f"Error loading model {model_name}: {e}")
-                return False
+                self.models[model_name] = ModelInfo(
+                    name=model_name,
+                    status=ModelStatus.READY,  # Assume ready if listed
+                    tier=tier
+                )
+            
+            logger.info(
+                "Model discovery completed",
+                discovered_models=len(self.models),
+                model_names=list(self.models.keys()),
+                correlation_id=correlation_id
+            )
+            
+        except Exception as e:
+            logger.error(
+                "Model discovery failed",
+                error=str(e),
+                correlation_id=correlation_id
+            )
+            raise
     
+    async def _preload_priority_models(self) -> None:
+        """Preload T0 priority models for instant availability."""
+        correlation_id = get_correlation_id()
+        
+        t0_models = self.priority_tiers.get("T0", [])
+        
+        for model_pattern in t0_models:
+            # Find matching models
+            matching_models = [
+                name for name in self.models.keys()
+                if name.startswith(model_pattern.split(':')[0])
+            ]
+            
+            for model_name in matching_models:
+                try:
+                    await self._ensure_model_loaded(model_name)
+                    logger.info(
+                        "Priority model preloaded",
+                        model_name=model_name,
+                        tier="T0",
+                        correlation_id=correlation_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to preload priority model",
+                        model_name=model_name,
+                        error=str(e),
+                        correlation_id=correlation_id
+                    )
+    
+    def select_optimal_model(
+        self,
+        task_type: TaskType,
+        quality_requirement: QualityLevel = QualityLevel.BALANCED,
+        context: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Select the optimal model for a given task and quality requirement.
+        
+        Args:
+            task_type: Type of task to perform
+            quality_requirement: Required quality level
+            context: Additional context for selection (user tier, budget, etc.)
+            
+        Returns:
+            str: Selected model name
+        """
+        correlation_id = get_correlation_id()
+        
+        # Start with base assignment
+        base_model = self.model_assignments.get(task_type, "llama2:7b")
+        
+        # Apply quality overrides
+        if quality_requirement in self.quality_overrides:
+            quality_overrides = self.quality_overrides[quality_requirement]
+            if task_type in quality_overrides:
+                base_model = quality_overrides[task_type]
+        
+        # Check if model is available
+        available_models = [name for name in self.models.keys() 
+                          if name.startswith(base_model.split(':')[0])]
+        
+        if not available_models:
+            # Fallback to any available model
+            fallback_model = self._select_fallback_model(task_type)
+            logger.warning(
+                "Preferred model not available, using fallback",
+                preferred_model=base_model,
+                fallback_model=fallback_model,
+                task_type=task_type.value,
+                correlation_id=correlation_id
+            )
+            return fallback_model
+        
+        # Select best performing variant if multiple available
+        selected_model = self._select_best_variant(available_models)
+        
+        logger.debug(
+            "Model selected",
+            task_type=task_type.value,
+            quality_requirement=quality_requirement.value,
+            selected_model=selected_model,
+            correlation_id=correlation_id
+        )
+        
+        return selected_model
+    
+    def _select_fallback_model(self, task_type: TaskType) -> str:
+        """Select a fallback model when preferred model is unavailable."""
+        # Fallback hierarchy
+        fallback_hierarchy = [
+            "llama2:7b", "phi:mini", "mistral:7b"
+        ]
+        
+        for fallback in fallback_hierarchy:
+            available = [name for name in self.models.keys() 
+                        if name.startswith(fallback.split(':')[0])]
+            if available:
+                return available[0]
+        
+        # Last resort - return first available model
+        if self.models:
+            return list(self.models.keys())[0]
+        
+        raise OllamaException("No models available")
+    
+    def _select_best_variant(self, available_models: List[str]) -> str:
+        """Select the best performing variant from available models."""
+        if len(available_models) == 1:
+            return available_models[0]
+        
+        # Score models based on performance metrics
+        scored_models = []
+        for model_name in available_models:
+            model_info = self.models.get(model_name)
+            if model_info:
+                score = model_info.performance_score
+                scored_models.append((model_name, score))
+        
+        if scored_models:
+            # Sort by score (highest first)
+            scored_models.sort(key=lambda x: x[1], reverse=True)
+            return scored_models[0][0]
+        
+        return available_models[0]
+    
+    @log_performance("model_generation")
     async def generate(
         self,
         model_name: str,
         prompt: str,
         max_tokens: int = 300,
         temperature: float = 0.7,
-        fallback: bool = True
+        fallback: bool = True,
+        **kwargs
     ) -> ModelResult:
-        """Generate text using specified model with fallback"""
-        self.total_requests += 1
+        """
+        Generate text using specified model with automatic fallback.
         
-        # Try primary model
-        result = await self._generate_with_model(
-            model_name, prompt, max_tokens, temperature
+        Args:
+            model_name: Model to use for generation
+            prompt: Input prompt
+            max_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            fallback: Enable fallback to alternative models
+            **kwargs: Additional generation parameters
+            
+        Returns:
+            ModelResult: Generation result with metadata
+        """
+        correlation_id = get_correlation_id()
+        
+        logger.debug(
+            "Starting text generation",
+            model_name=model_name,
+            prompt_length=len(prompt),
+            max_tokens=max_tokens,
+            temperature=temperature,
+            correlation_id=correlation_id
         )
         
-        if result.success:
-            self.local_requests += 1
-            return result
-        
-        # Fallback logic
-        if fallback:
-            fallback_model = self._get_fallback_model(model_name)
-            if fallback_model and fallback_model != model_name:
-                logger.warning(
-                    f"Falling back from {model_name} to {fallback_model}",
-                    original_error=result.error
-                )
-                
-                fallback_result = await self._generate_with_model(
-                    fallback_model, prompt, max_tokens, temperature
-                )
-                
-                if fallback_result.success:
-                    self.local_requests += 1
-                    fallback_result.metadata["fallback_from"] = model_name
-                    return fallback_result
-        
-        return result
-    
-    async def _generate_with_model(
-        self,
-        model_name: str,
-        prompt: str,
-        max_tokens: int,
-        temperature: float
-    ) -> ModelResult:
-        """Generate with a specific model"""
         # Ensure model is loaded
-        if not await self._ensure_model_loaded(model_name):
+        try:
+            await self._ensure_model_loaded(model_name)
+        except Exception as e:
+            if fallback:
+                logger.warning(
+                    "Failed to load primary model, trying fallback",
+                    primary_model=model_name,
+                    error=str(e),
+                    correlation_id=correlation_id
+                )
+                fallback_model = self._select_fallback_model(TaskType.CONVERSATION)
+                return await self.generate(
+                    fallback_model, prompt, max_tokens, temperature, fallback=False, **kwargs
+                )
+            else:
+                return ModelResult(
+                    success=False,
+                    model_used=model_name,
+                    error=f"Model loading failed: {e}"
+                )
+        
+        # Perform generation
+        try:
+            result = await self.ollama_client.generate(
+                model_name=model_name,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                **kwargs
+            )
+            
+            # Update model statistics
+            if model_name in self.models:
+                # TODO: Add confidence scoring logic
+                confidence = 0.8  # Placeholder
+                self.models[model_name].update_stats(result, confidence)
+            
+            logger.info(
+                "Text generation completed",
+                model_name=model_name,
+                success=result.success,
+                execution_time=result.execution_time,
+                tokens_generated=result.tokens_generated,
+                correlation_id=correlation_id
+            )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(
+                "Text generation failed",
+                model_name=model_name,
+                error=str(e),
+                correlation_id=correlation_id
+            )
+            
+            if fallback:
+                fallback_model = self._select_fallback_model(TaskType.CONVERSATION)
+                if fallback_model != model_name:
+                    logger.info(
+                        "Attempting fallback model",
+                        failed_model=model_name,
+                        fallback_model=fallback_model,
+                        correlation_id=correlation_id
+                    )
+                    return await self.generate(
+                        fallback_model, prompt, max_tokens, temperature, fallback=False, **kwargs
+                    )
+            
             return ModelResult(
                 success=False,
-                error=f"Failed to load model {model_name}",
-                model_used=model_name
+                model_used=model_name,
+                error=str(e)
             )
+    
+    async def _ensure_model_loaded(self, model_name: str) -> None:
+        """Ensure a model is loaded and ready for inference."""
+        correlation_id = get_correlation_id()
         
-        # Generate
-        result = await self.ollama_client.generate(
-            model_name, prompt, max_tokens, temperature
+        # Check if already loaded
+        if model_name in self.loaded_models:
+            return
+        
+        # Use lock to prevent concurrent loading of same model
+        if model_name not in self._loading_locks:
+            self._loading_locks[model_name] = asyncio.Lock()
+        
+        async with self._loading_locks[model_name]:
+            # Double-check after acquiring lock
+            if model_name in self.loaded_models:
+                return
+            
+            logger.info(
+                "Loading model",
+                model_name=model_name,
+                correlation_id=correlation_id
+            )
+            
+            start_time = time.time()
+            
+            try:
+                # Check if model exists in Ollama
+                status = await self.ollama_client.check_model_status(model_name)
+                
+                if status == ModelStatus.UNKNOWN:
+                    # Try to pull the model
+                    logger.info(
+                        "Model not found, attempting to pull",
+                        model_name=model_name,
+                        correlation_id=correlation_id
+                    )
+                    await self.ollama_client.pull_model(model_name)
+                
+                # Verify model is ready
+                status = await self.ollama_client.check_model_status(model_name)
+                if status != ModelStatus.READY:
+                    raise OllamaException(f"Model {model_name} failed to load properly")
+                
+                # Model successfully loaded
+                self.loaded_models.add(model_name)
+                load_time = time.time() - start_time
+                
+                if model_name in self.models:
+                    self.models[model_name].load_time = load_time
+                    self.models[model_name].status = ModelStatus.READY
+                
+                logger.info(
+                    "Model loaded successfully",
+                    model_name=model_name,
+                    load_time=round(load_time, 2),
+                    correlation_id=correlation_id
+                )
+                
+            except Exception as e:
+                logger.error(
+                    "Model loading failed",
+                    model_name=model_name,
+                    error=str(e),
+                    correlation_id=correlation_id
+                )
+                
+                if model_name in self.models:
+                    self.models[model_name].status = ModelStatus.ERROR
+                
+                raise
+    
+    async def preload_models(self, model_names: List[str]) -> Dict[str, bool]:
+        """
+        Preload multiple models concurrently.
+        
+        Args:
+            model_names: List of model names to preload
+            
+        Returns:
+            Dict mapping model names to success status
+        """
+        correlation_id = get_correlation_id()
+        
+        logger.info(
+            "Preloading models",
+            model_names=model_names,
+            correlation_id=correlation_id
         )
         
-        # Update statistics
-        if model_name in self.models:
-            self.models[model_name].update_stats(result.execution_time, result.cost)
+        results = {}
         
-        self.total_cost += result.cost
+        # Load models concurrently
+        tasks = []
+        for model_name in model_names:
+            task = asyncio.create_task(
+                self._preload_single_model(model_name),
+                name=f"preload_{model_name}"
+            )
+            tasks.append((model_name, task))
         
-        return result
+        # Wait for all tasks to complete
+        for model_name, task in tasks:
+            try:
+                await task
+                results[model_name] = True
+            except Exception as e:
+                logger.error(
+                    "Model preload failed",
+                    model_name=model_name,
+                    error=str(e),
+                    correlation_id=correlation_id
+                )
+                results[model_name] = False
+        
+        successful_loads = sum(results.values())
+        
+        logger.info(
+            "Model preloading completed",
+            total_models=len(model_names),
+            successful_loads=successful_loads,
+            failed_loads=len(model_names) - successful_loads,
+            correlation_id=correlation_id
+        )
+        
+        return results
     
-    def _get_fallback_model(self, original_model: str) -> Optional[str]:
-        """Get fallback model for a failed model"""
-        fallback_mapping = {
-            "phi:mini": "llama2:7b",
-            "llama2:7b": "phi:mini",
-            "mistral:7b": "llama2:7b",
-            "llama2:13b": "mistral:7b",
-            "codellama": "llama2:7b"
-        }
-        
-        return fallback_mapping.get(original_model)
+    async def _preload_single_model(self, model_name: str) -> None:
+        """Preload a single model with error handling."""
+        try:
+            await self._ensure_model_loaded(model_name)
+        except Exception as e:
+            logger.warning(
+                "Single model preload failed",
+                model_name=model_name,
+                error=str(e),
+                correlation_id=get_correlation_id()
+            )
+            raise
     
-    def select_optimal_model(self, task_type: str, quality_requirement: str = "balanced") -> str:
-        """Select optimal model for a task"""
-        # Get base model for task type
-        base_model = MODEL_ASSIGNMENTS.get(task_type, "llama2:7b")
-        
-        # Adjust based on quality requirement
-        if quality_requirement == "minimal":
-            return "phi:mini"
-        elif quality_requirement == "premium":
-            if task_type in ["analytical_reasoning", "deep_research"]:
-                return "llama2:13b"
-            elif task_type == "code_tasks":
-                return "codellama"
-        
-        return base_model
-    
-    async def get_metrics(self) -> Dict[str, Any]:
-        """Get model manager metrics"""
-        local_percentage = (self.local_requests / self.total_requests * 100) if self.total_requests > 0 else 0
-        
-        model_stats = {}
-        for name, info in self.models.items():
-            model_stats[name] = {
-                "status": info.status.value,
-                "total_requests": info.total_requests,
-                "avg_response_time": info.avg_response_time,
-                "last_used": info.last_used.isoformat(),
-                "tier": info.tier
+    def get_model_stats(self) -> Dict[str, Any]:
+        """Get comprehensive model statistics."""
+        stats = {
+            "total_models": len(self.models),
+            "loaded_models": len(self.loaded_models),
+            "model_details": {},
+            "performance_summary": {
+                "avg_response_time": 0.0,
+                "avg_success_rate": 0.0,
+                "total_requests": 0
             }
-        
-        return {
-            "total_requests": self.total_requests,
-            "local_requests": self.local_requests,
-            "local_percentage": local_percentage,
-            "total_cost": self.total_cost,
-            "loaded_models": len([m for m in self.models.values() if m.status == ModelStatus.READY]),
-            "model_stats": model_stats
         }
+        
+        total_response_time = 0.0
+        total_success_rate = 0.0
+        total_requests = 0
+        
+        for model_name, model_info in self.models.items():
+            stats["model_details"][model_name] = {
+                "status": model_info.status.value,
+                "tier": model_info.tier,
+                "total_requests": model_info.total_requests,
+                "avg_response_time": round(model_info.avg_response_time, 3),
+                "avg_tokens_per_second": round(model_info.avg_tokens_per_second, 2),
+                "success_rate": round(model_info.success_rate, 3),
+                "avg_confidence": round(model_info.avg_confidence, 3),
+                "performance_score": round(model_info.performance_score, 3),
+                "last_used": model_info.last_used.isoformat(),
+                "is_loaded": model_name in self.loaded_models
+            }
+            
+            if model_info.total_requests > 0:
+                total_response_time += model_info.avg_response_time
+                total_success_rate += model_info.success_rate
+                total_requests += model_info.total_requests
+        
+        # Calculate averages
+        if self.models:
+            stats["performance_summary"]["avg_response_time"] = round(
+                total_response_time / len(self.models), 3
+            )
+            stats["performance_summary"]["avg_success_rate"] = round(
+                total_success_rate / len(self.models), 3
+            )
+        
+        stats["performance_summary"]["total_requests"] = total_requests
+        
+        return stats
     
-    def is_healthy(self) -> bool:
-        """Check if model manager is healthy"""
-        # At least one model should be ready
-        ready_models = [m for m in self.models.values() if m.status == ModelStatus.READY]
-        return len(ready_models) > 0
+    def get_model_recommendations(self, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Get model optimization recommendations."""
+        recommendations = {
+            "performance_optimizations": [],
+            "cost_optimizations": [],
+            "reliability_improvements": []
+        }
+        
+        for model_name, model_info in self.models.items():
+            # Performance recommendations
+            if model_info.avg_response_time > 10.0:
+                recommendations["performance_optimizations"].append(
+                    f"Model {model_name} has slow response time ({model_info.avg_response_time:.1f}s). "
+                    f"Consider using a faster model for simple tasks."
+                )
+            
+            # Reliability recommendations
+            if model_info.success_rate < 0.9 and model_info.total_requests > 5:
+                recommendations["reliability_improvements"].append(
+                    f"Model {model_name} has low success rate ({model_info.success_rate:.1%}). "
+                    f"Check model health or consider alternative."
+                )
+            
+            # Cost optimizations (for future API model integration)
+            if model_info.total_cost > 0:
+                recommendations["cost_optimizations"].append(
+                    f"Model {model_name} has incurred costs. Consider local alternatives."
+                )
+        
+        return recommendations
+    
+    async def cleanup(self) -> None:
+        """Clean up resources and close connections."""
+        correlation_id = get_correlation_id()
+        
+        logger.info("Cleaning up ModelManager", correlation_id=correlation_id)
+        
+        try:
+            await self.ollama_client.close()
+            self.loaded_models.clear()
+            self._loading_locks.clear()
+            
+            logger.info("ModelManager cleanup completed", correlation_id=correlation_id)
+            
+        except Exception as e:
+            logger.error(
+                "ModelManager cleanup failed",
+                error=str(e),
+                correlation_id=correlation_id
+            )
+
+
+# Export main classes and types
+__all__ = [
+    'ModelManager',
+    'ModelInfo',
+    'TaskType',
+    'QualityLevel'
+]
