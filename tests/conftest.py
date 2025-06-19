@@ -13,6 +13,7 @@ from app.main import app
 from app.models.manager import ModelManager
 from app.cache.redis_client import CacheManager
 from app.core.config import get_settings
+from app.api import security
 
 
 @pytest.fixture(scope="session")
@@ -95,3 +96,10 @@ async def mock_cache_manager():
             return {"cache_hits": 0, "cache_misses": 0}
     
     return MockCacheManager()
+
+
+@pytest.fixture(autouse=True)
+def override_get_current_user(monkeypatch):
+    async def dummy_user(*args, **kwargs):
+        return {"user_id": "test_user", "tier": "free"}
+    monkeypatch.setattr(security, "get_current_user", dummy_user)

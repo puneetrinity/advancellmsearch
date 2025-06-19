@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from app.graphs.base import (
     BaseGraph, BaseGraphNode, GraphState, NodeResult, 
-    GraphType, NodeType, ConditionalNode
+    GraphType, NodeType
 )
 from app.models.manager import ModelManager, TaskType, QualityLevel
 from app.core.logging import get_logger
@@ -714,6 +714,24 @@ class ChatGraph(BaseGraph):
             return "end"
         
         self.add_conditional_edge("cache_update", check_for_errors)
+    
+    def get_performance_stats(self) -> dict:
+        """Return performance statistics for the chat graph and its nodes."""
+        node_stats = {name: node.get_performance_stats() for name, node in self.nodes.items()}
+        execution_count = sum(stats.get("execution_count", 0) for stats in node_stats.values())
+        total_successes = sum(stats.get("success_count", 0) for stats in node_stats.values())
+        total_execution_time = sum(stats.get("total_execution_time", 0.0) for stats in node_stats.values())
+        avg_execution_time = (total_execution_time / execution_count) if execution_count else 0.0
+        return {
+            "graph_name": self.name,
+            "graph_type": self.graph_type.value,
+            "execution_count": execution_count,
+            "success_rate": (total_successes / execution_count) if execution_count else 0.0,
+            "avg_execution_time": avg_execution_time,
+            "total_execution_time": total_execution_time,
+            "node_count": len(self.nodes),
+            "node_stats": node_stats
+        }
 
 
 # Export main classes

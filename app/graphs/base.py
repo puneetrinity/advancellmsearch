@@ -27,6 +27,14 @@ class GraphType(Enum):
     ORCHESTRATOR = "orchestrator"
 
 
+class NodeType(Enum):
+    """Node type enumeration"""
+    CONTROL = "control"
+    PROCESSING = "processing"
+    INPUT = "input"
+    OUTPUT = "output"
+
+
 class NodeResult(BaseModel):
     """Standard result format for graph nodes"""
     success: bool
@@ -109,6 +117,23 @@ class BaseGraphNode(ABC):
         self.name = name
         self.node_type = node_type
         self.logger = structlog.get_logger(f"node.{name}")
+        # Performance tracking attributes
+        self.execution_times: List[float] = []
+        self.success_count: int = 0
+        self.failure_count: int = 0
+
+    def get_performance_stats(self) -> dict:
+        """Return performance statistics for this node."""
+        total_runs = self.success_count + self.failure_count
+        avg_time = sum(self.execution_times) / len(self.execution_times) if self.execution_times else 0.0
+        return {
+            "node_name": self.name,
+            "node_type": self.node_type,
+            "total_runs": total_runs,
+            "success_count": self.success_count,
+            "failure_count": self.failure_count,
+            "avg_execution_time": avg_time
+        }
     
     @abstractmethod
     async def execute(self, state: GraphState, **kwargs) -> NodeResult:
@@ -116,7 +141,7 @@ class BaseGraphNode(ABC):
         pass
     
     async def __call__(self, state: GraphState, **kwargs) -> GraphState:
-        """Node execution wrapper with error handling and timing"""
+        """Node execution wrapper with error handling and timing, with performance tracking."""
         start_time = datetime.now()
         
         try:
@@ -138,6 +163,12 @@ class BaseGraphNode(ABC):
             
             # Store result in intermediate results
             state.intermediate_results[self.name] = result.data
+            
+            self.execution_times.append(execution_time)
+            if result.success:
+                self.success_count += 1
+            else:
+                self.failure_count += 1
             
             self.logger.info(
                 "Node execution completed",
@@ -163,6 +194,9 @@ class BaseGraphNode(ABC):
             )
             
             state.add_execution_step(self.name, error_result)
+            
+            self.failure_count += 1
+            self.execution_times.append(execution_time)
             
             self.logger.error(
                 "Node execution failed",

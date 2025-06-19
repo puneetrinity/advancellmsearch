@@ -263,7 +263,7 @@ async def test_error_handling():
         state = GraphState(
             original_query=test_case["query"],
             session_id=f"error_test_{i}",
-            max_cost=0.05,  # Low budget to test constraint handling
+            cost_budget_remaining=0.05,  # Low budget to test constraint handling
             max_execution_time=10.0  # Short time limit
         )
         

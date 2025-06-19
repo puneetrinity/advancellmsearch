@@ -15,7 +15,8 @@ from sse_starlette.sse import EventSourceResponse
 from app.core.logging import get_logger, get_correlation_id, set_correlation_id, log_performance
 from app.core.config import get_settings
 from app.api.security import get_current_user, SecureChatInput, check_content_policy
-from app.graphs.base import GraphState, QualityLevel
+from app.graphs.base import GraphState
+from app.models.manager import QualityLevel
 from app.graphs.chat_graph import ChatGraph
 from app.models.manager import ModelManager
 from app.cache.redis_client import CacheManager

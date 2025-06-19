@@ -414,30 +414,12 @@ class ModelManager:
             correlation_id=correlation_id
         )
         
-        # Ensure model is loaded
+        # Try primary model first
         try:
+            # Ensure model is loaded
             await self._ensure_model_loaded(model_name)
-        except Exception as e:
-            if fallback:
-                logger.warning(
-                    "Failed to load primary model, trying fallback",
-                    primary_model=model_name,
-                    error=str(e),
-                    correlation_id=correlation_id
-                )
-                fallback_model = self._select_fallback_model(TaskType.CONVERSATION)
-                return await self.generate(
-                    fallback_model, prompt, max_tokens, temperature, fallback=False, **kwargs
-                )
-            else:
-                return ModelResult(
-                    success=False,
-                    model_used=model_name,
-                    error=f"Model loading failed: {e}"
-                )
-        
-        # Perform generation
-        try:
+            
+            # Generate with primary model
             result = await self.ollama_client.generate(
                 model_name=model_name,
                 prompt=prompt,
@@ -446,49 +428,173 @@ class ModelManager:
                 **kwargs
             )
             
-            # Update model statistics
+            # Update model stats with the result object and default confidence
             if model_name in self.models:
-                # TODO: Add confidence scoring logic
-                confidence = 0.8  # Placeholder
-                self.models[model_name].update_stats(result, confidence)
+                self.models[model_name].update_stats(result, confidence=0.8)  # pass result object
+                result.cost = 0.0  # Local models have no cost
             
-            logger.info(
-                "Text generation completed",
-                model_name=model_name,
-                success=result.success,
-                execution_time=result.execution_time,
-                tokens_generated=result.tokens_generated,
-                correlation_id=correlation_id
-            )
-            
-            return result
-            
+            if result.success:
+                logger.debug(
+                    "Primary model generation successful",
+                    model_name=model_name,
+                    correlation_id=correlation_id
+                )
+                return result
+            else:
+                # Primary model failed, try fallback if enabled
+                if fallback:
+                    logger.warning(
+                        "Primary model generation failed, trying fallback",
+                        primary_model=model_name,
+                        error=result.error,
+                        correlation_id=correlation_id
+                    )
+                    return await self._try_fallback_generation(
+                        original_model=model_name,
+                        prompt=prompt,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        **kwargs
+                    )
+                else:
+                    return result
+                    
         except Exception as e:
             logger.error(
-                "Text generation failed",
+                "Model generation failed",
                 model_name=model_name,
                 error=str(e),
                 correlation_id=correlation_id
             )
             
             if fallback:
-                fallback_model = self._select_fallback_model(TaskType.CONVERSATION)
-                if fallback_model != model_name:
-                    logger.info(
-                        "Attempting fallback model",
-                        failed_model=model_name,
-                        fallback_model=fallback_model,
-                        correlation_id=correlation_id
-                    )
-                    return await self.generate(
-                        fallback_model, prompt, max_tokens, temperature, fallback=False, **kwargs
-                    )
+                logger.warning(
+                    "Primary model exception, trying fallback",
+                    primary_model=model_name,
+                    error=str(e),
+                    correlation_id=correlation_id
+                )
+                return await self._try_fallback_generation(
+                    original_model=model_name,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    **kwargs
+                )
+            else:
+                return ModelResult(
+                    success=False,
+                    model_used=model_name,
+                    error=str(e)
+                )
+
+    async def _try_fallback_generation(
+        self,
+        original_model: str,
+        prompt: str,
+        max_tokens: int = 300,
+        temperature: float = 0.7,
+        **kwargs
+    ) -> ModelResult:
+        """
+        Try fallback models when primary model fails.
+        
+        Args:
+            original_model: The model that failed
+            prompt: Input prompt
+            max_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            **kwargs: Additional generation parameters
             
+        Returns:
+            ModelResult: Generation result from fallback model
+        """
+        correlation_id = get_correlation_id()
+        
+        # Get list of fallback models (exclude the failed one)
+        fallback_models = [
+            name for name in self.models.keys() 
+            if name != original_model and self.models[name].status == ModelStatus.READY
+        ]
+        
+        if not fallback_models:
+            # Try to use any available model as fallback
+            try:
+                available_models = await self.ollama_client.list_models()
+                fallback_models = [
+                    model["name"] for model in available_models 
+                    if model["name"] != original_model
+                ]
+            except Exception:
+                fallback_models = []
+        
+        if not fallback_models:
             return ModelResult(
                 success=False,
-                model_used=model_name,
-                error=str(e)
+                model_used=original_model,
+                error="No fallback models available"
             )
+        
+        # Try fallback models one by one
+        for fallback_model in fallback_models[:3]:  # Limit to 3 attempts
+            try:
+                logger.debug(
+                    "Trying fallback model",
+                    original_model=original_model,
+                    fallback_model=fallback_model,
+                    correlation_id=correlation_id
+                )
+                await self._ensure_model_loaded(fallback_model)
+                result = await self.ollama_client.generate(
+                    model_name=fallback_model,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    **kwargs
+                )
+                # Only update stats if result is a ModelResult
+                if isinstance(result, ModelResult):
+                    if result.success:
+                        logger.info(
+                            "Fallback generation successful",
+                            original_model=original_model,
+                            fallback_model=fallback_model,
+                            correlation_id=correlation_id
+                        )
+                        if fallback_model in self.models:
+                            self.models[fallback_model].update_stats(result, confidence=0.7)
+                            result.cost = 0.0
+                        return result
+                    else:
+                        logger.warning(
+                            "Fallback model also failed",
+                            fallback_model=fallback_model,
+                            error=result.error,
+                            correlation_id=correlation_id
+                        )
+                        continue
+                else:
+                    logger.warning(
+                        "Fallback model returned non-ModelResult",
+                        fallback_model=fallback_model,
+                        result_type=str(type(result)),
+                        correlation_id=correlation_id
+                    )
+                    continue
+            except Exception as e:
+                logger.warning(
+                    "Fallback model exception",
+                    fallback_model=fallback_model,
+                    error=str(e),
+                    correlation_id=correlation_id
+                )
+                continue
+        # All fallbacks failed
+        return ModelResult(
+            success=False,
+            model_used=original_model,
+            error=f"All fallback attempts failed. Original model: {original_model}"
+        )
     
     async def _ensure_model_loaded(self, model_name: str) -> None:
         """Ensure a model is loaded and ready for inference."""

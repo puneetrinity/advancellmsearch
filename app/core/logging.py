@@ -42,6 +42,12 @@ class PerformanceProcessor:
         event_dict['level'] = method_name.upper()
         return event_dict
 
+class CorrelationIdFilter(logging.Filter):
+    def filter(self, record):
+        if not hasattr(record, 'correlation_id'):
+            record.correlation_id = get_correlation_id() or "-"
+        return True
+
 def setup_logging(
     log_level: str = "INFO",
     log_format: str = "json",  # json or text
@@ -94,6 +100,7 @@ def setup_logging(
     
     # Console handler with appropriate formatter
     console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.addFilter(CorrelationIdFilter())
     if log_format == "json":
         formatter = jsonlogger.JsonFormatter(
             '%(asctime)s %(name)s %(levelname)s %(correlation_id)s %(message)s'
@@ -104,13 +111,13 @@ def setup_logging(
         )
     console_handler.setFormatter(formatter)
     handlers.append(console_handler)
-    
+
     # File handler if enabled
     if enable_file_logging:
         import os
         os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
-        
         file_handler = logging.FileHandler(log_file_path)
+        file_handler.addFilter(CorrelationIdFilter())
         file_formatter = jsonlogger.JsonFormatter(
             '%(asctime)s %(name)s %(levelname)s %(correlation_id)s %(message)s'
         )
