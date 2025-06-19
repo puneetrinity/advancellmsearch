@@ -5,7 +5,7 @@ Pydantic models for request validation
 """
 
 from typing import Optional, List, Dict, Any, Union
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class Constraints(BaseModel):
@@ -15,7 +15,7 @@ class Constraints(BaseModel):
     quality_requirement: Optional[str] = Field("balanced", description="Quality level: minimal, balanced, high, premium")
     force_local_only: Optional[bool] = Field(False, description="Force local models only")
     
-    @validator('quality_requirement')
+    @field_validator('quality_requirement')
     def validate_quality(cls, v):
         allowed = ["minimal", "balanced", "high", "premium"]
         if v not in allowed:
@@ -36,7 +36,7 @@ class ChatMessage(BaseModel):
     content: str = Field(..., description="Message content")
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
     
-    @validator('role')
+    @field_validator('role')
     def validate_role(cls, v):
         allowed = ["user", "assistant", "system"]
         if v not in allowed:
@@ -51,8 +51,8 @@ class ChatRequest(BaseModel):
     context: Optional[Context] = Field(None, description="Additional context")
     constraints: Optional[Constraints] = Field(None, description="Request constraints")
     
-    class Config:
-        schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "message": "Explain how async/await works in Python",
                 "session_id": "session_123",
@@ -69,6 +69,7 @@ class ChatRequest(BaseModel):
                 }
             }
         }
+    }
 
 
 class ChatStreamRequest(BaseModel):
@@ -83,13 +84,13 @@ class ChatStreamRequest(BaseModel):
     quality_requirement: Optional[str] = Field("balanced")
     max_completion_time: Optional[float] = Field(30.0)
     
-    @validator('temperature')
+    @field_validator('temperature')
     def validate_temperature(cls, v):
         if v < 0 or v > 2:
             raise ValueError("Temperature must be between 0 and 2")
         return v
     
-    @validator('max_tokens')
+    @field_validator('max_tokens')
     def validate_max_tokens(cls, v):
         if v < 1 or v > 4000:
             raise ValueError("Max tokens must be between 1 and 4000")
@@ -105,21 +106,21 @@ class SearchRequest(BaseModel):
     constraints: Optional[Constraints] = Field(None, description="Request constraints")
     session_id: Optional[str] = Field(None, description="Session ID")
     
-    @validator('search_depth')
+    @field_validator('search_depth')
     def validate_search_depth(cls, v):
         allowed = ["shallow", "balanced", "deep", "comprehensive"]
         if v not in allowed:
             raise ValueError(f"Search depth must be one of: {allowed}")
         return v
     
-    @validator('analysis_type')
+    @field_validator('analysis_type')
     def validate_analysis_type(cls, v):
         allowed = ["summary", "detailed", "comparative", "analytical"]
         if v not in allowed:
             raise ValueError(f"Analysis type must be one of: {allowed}")
         return v
     
-    @validator('sources')
+    @field_validator('sources')
     def validate_sources(cls, v):
         allowed = ["web", "academic", "news", "technical", "social"]
         if not all(source in allowed for source in v):
@@ -137,14 +138,14 @@ class ResearchRequest(BaseModel):
     depth_level: Optional[int] = Field(3, description="Research depth level (1-5)")
     session_id: Optional[str] = Field(None, description="Session ID")
     
-    @validator('methodology')
+    @field_validator('methodology')
     def validate_methodology(cls, v):
         allowed = ["systematic", "exploratory", "comparative", "meta-analysis"]
         if v not in allowed:
             raise ValueError(f"Methodology must be one of: {allowed}")
         return v
     
-    @validator('depth_level')
+    @field_validator('depth_level')
     def validate_depth_level(cls, v):
         if v < 1 or v > 5:
             raise ValueError("Depth level must be between 1 and 5")
@@ -212,8 +213,8 @@ class ChatResponse(BaseResponse):
     """Chat completion response"""
     data: Dict[str, Any] = Field(..., description="Chat response data")
     
-    class Config:
-        schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "status": "success",
                 "data": {
@@ -247,6 +248,7 @@ class ChatResponse(BaseResponse):
                 }
             }
         }
+    }
 
 
 class SearchResponse(BaseResponse):
@@ -267,8 +269,8 @@ class ErrorResponse(BaseModel):
     query_id: Optional[str] = Field(None, description="Query ID if available")
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     
-    class Config:
-        schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "status": "error",
                 "message": "Rate limit exceeded",
@@ -277,6 +279,7 @@ class ErrorResponse(BaseModel):
                 "timestamp": "2025-06-19T10:30:00Z"
             }
         }
+    }
 
 
 class HealthResponse(BaseModel):

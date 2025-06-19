@@ -1,8 +1,4 @@
 # requirements.txt
-"""
-Core dependencies for AI Search System
-"""
-
 # FastAPI and async support
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
@@ -11,8 +7,8 @@ pydantic-settings==2.1.0
 
 # LangGraph and LangChain
 langgraph==0.0.32
-langchain==0.1.0
-langchain-core==0.1.12
+langchain
+# langchain-core removed to resolve dependency conflicts
 
 # HTTP clients
 aiohttp==3.9.1
@@ -38,5 +34,3 @@ numpy==1.24.4
 
 # Optional: ClickHouse for cold storage (Phase 2)
 # clickhouse-driver==0.2.6
-
----

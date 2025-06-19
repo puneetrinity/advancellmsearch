@@ -7,6 +7,7 @@ import pytest
 import asyncio
 from typing import AsyncGenerator
 from fastapi.testclient import TestClient
+from httpx import AsyncClient
 
 from app.main import app
 from app.models.manager import ModelManager
@@ -24,8 +25,16 @@ def event_loop():
 
 @pytest.fixture
 def client():
-    """FastAPI test client"""
-    return TestClient(app)
+    """FastAPI test client with lifespan support (sync)"""
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture
+async def async_client():
+    """Async FastAPI test client with lifespan support (async)"""
+    async with AsyncClient(app=app, base_url="http://test") as ac:
+        yield ac
 
 
 @pytest.fixture

@@ -6,7 +6,8 @@ Environment-based configuration with sensible defaults
 
 from functools import lru_cache
 from typing import List, Optional
-from pydantic import BaseSettings, Field
+from pydantic_settings import BaseSettings
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -14,78 +15,80 @@ class Settings(BaseSettings):
     
     # Application
     app_name: str = "AI Search System"
-    debug: bool = Field(False, env="DEBUG")
-    environment: str = Field("development", env="ENVIRONMENT")
+    debug: bool = False
+    environment: str = "development"
     
     # API Configuration
-    api_host: str = Field("0.0.0.0", env="API_HOST")
-    api_port: int = Field(8000, env="API_PORT")
-    allowed_origins: List[str] = Field(
-        ["http://localhost:3000", "http://localhost:8000"],
-        env="ALLOWED_ORIGINS"
-    )
+    api_host: str = "0.0.0.0"
+    api_port: int = 8000
+    allowed_origins: List[str] = ["http://localhost:3000", "http://localhost:8000"]
     
     # Ollama Configuration
-    ollama_host: str = Field("http://localhost:11434", env="OLLAMA_HOST")
-    ollama_timeout: int = Field(60, env="OLLAMA_TIMEOUT")
-    ollama_max_retries: int = Field(3, env="OLLAMA_MAX_RETRIES")
+    ollama_host: str = "http://localhost:11434"
+    ollama_timeout: int = 60
+    ollama_max_retries: int = 3
     
     # Redis Configuration
-    redis_url: str = Field("redis://localhost:6379", env="REDIS_URL")
-    redis_max_connections: int = Field(20, env="REDIS_MAX_CONNECTIONS")
-    redis_timeout: int = Field(5, env="REDIS_TIMEOUT")
+    redis_url: str = "redis://localhost:6379"
+    redis_max_connections: int = 20
+    redis_timeout: int = 5
     
     # Model Configuration
-    default_model: str = Field("phi:mini", env="DEFAULT_MODEL")
-    fallback_model: str = Field("llama2:7b", env="FALLBACK_MODEL")
-    max_concurrent_models: int = Field(3, env="MAX_CONCURRENT_MODELS")
-    model_memory_threshold: float = Field(0.8, env="MODEL_MEMORY_THRESHOLD")
+    default_model: str = "phi:mini"
+    fallback_model: str = "llama2:7b"
+    max_concurrent_models: int = 3
+    model_memory_threshold: float = 0.8
     
     # Cost & Budget Configuration
-    cost_per_api_call: float = Field(0.008, env="COST_PER_API_CALL")
-    default_monthly_budget: float = Field(20.0, env="DEFAULT_MONTHLY_BUDGET")
-    cost_tracking_enabled: bool = Field(True, env="COST_TRACKING_ENABLED")
+    cost_per_api_call: float = 0.008
+    default_monthly_budget: float = 20.0
+    cost_tracking_enabled: bool = True
     
     # Rate Limiting
-    rate_limit_per_minute: int = Field(60, env="RATE_LIMIT_PER_MINUTE")
-    rate_limit_burst: int = Field(10, env="RATE_LIMIT_BURST")
+    rate_limit_per_minute: int = 60
+    rate_limit_burst: int = 10
     
     # Cache Configuration
-    cache_ttl_default: int = Field(3600, env="CACHE_TTL_DEFAULT")  # 1 hour
-    cache_ttl_routing: int = Field(300, env="CACHE_TTL_ROUTING")   # 5 minutes
-    cache_ttl_responses: int = Field(1800, env="CACHE_TTL_RESPONSES")  # 30 minutes
+    cache_ttl_default: int = 3600  # 1 hour
+    cache_ttl_routing: int = 300   # 5 minutes
+    cache_ttl_responses: int = 1800  # 30 minutes
     
     # Performance Targets
-    target_response_time: float = Field(2.5, env="TARGET_RESPONSE_TIME")
-    target_local_processing: float = Field(0.85, env="TARGET_LOCAL_PROCESSING")
-    target_cache_hit_rate: float = Field(0.80, env="TARGET_CACHE_HIT_RATE")
+    target_response_time: float = 2.5
+    target_local_processing: float = 0.85
+    target_cache_hit_rate: float = 0.80
     
     # LangGraph Configuration
-    graph_max_iterations: int = Field(50, env="GRAPH_MAX_ITERATIONS")
-    graph_timeout: int = Field(30, env="GRAPH_TIMEOUT")
-    graph_retry_attempts: int = Field(2, env="GRAPH_RETRY_ATTEMPTS")
+    graph_max_iterations: int = 50
+    graph_timeout: int = 30
+    graph_retry_attempts: int = 2
     
     # External APIs
-    brave_search_api_key: Optional[str] = Field(None, env="BRAVE_SEARCH_API_KEY")
-    zerows_api_key: Optional[str] = Field(None, env="ZEROWS_API_KEY")
-    openai_api_key: Optional[str] = Field(None, env="OPENAI_API_KEY")
-    anthropic_api_key: Optional[str] = Field(None, env="ANTHROPIC_API_KEY")
+    brave_search_api_key: Optional[str] = None
+    zerows_api_key: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
     
     # Logging
-    log_level: str = Field("INFO", env="LOG_LEVEL")
-    log_format: str = Field("json", env="LOG_FORMAT")  # json or text
+    log_level: str = "INFO"
+    log_format: str = "json"  # json or text
     
     # Security
-    jwt_secret_key: str = Field("dev-secret-key", env="JWT_SECRET_KEY")
-    jwt_algorithm: str = Field("HS256", env="JWT_ALGORITHM")
-    jwt_expiry_hours: int = Field(24, env="JWT_EXPIRY_HOURS")
+    jwt_secret_key: str = "dev-secret-key"
+    jwt_algorithm: str = "HS256"
+    jwt_expiry_hours: int = 24
     
     # Database (for future use)
-    database_url: Optional[str] = Field(None, env="DATABASE_URL")
+    database_url: Optional[str] = None
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    model_config = {
+        "env_file": ".env",
+        "case_sensitive": False,
+        "protected_namespaces": ("settings_",),
+        "env_prefix": "",
+        "populate_by_name": True,
+        "extra": "ignore"
+    }
 
 
 class DevelopmentSettings(Settings):

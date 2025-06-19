@@ -179,7 +179,7 @@ class CacheManager:
     async def cleanup(self):
         """Cleanup Redis connections"""
         if self.redis:
-            await self.redis.close()
+            await self.redis.aclose()
         if self.redis_pool:
             await self.redis_pool.disconnect()
     

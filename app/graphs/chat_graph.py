@@ -268,12 +268,17 @@ class ResponseGeneratorNode(BaseGraphNode):
             style_instruction = "Keep your response concise and to the point."
         elif state.user_preferences.get("response_style") == "detailed":
             style_instruction = "Provide a comprehensive and detailed response."
+        # Build context strings outside the f-string to avoid SyntaxError
+        prev_convo = f"Previous conversation:\n{context}\n" if context else ""
+        convo_context = f"Conversation context:\n{context}\n" if context else ""
+        relevant_history = f"Relevant chat history:\n{context}\n" if context else ""
+        search_context = f"Context:\n{context}\n" if context else ""
         if intent == "simple_chat":
             prompt = f"""You are a helpful AI assistant. Respond naturally and conversationally to the user's query.
 
 {style_instruction}
 
-{f"Previous conversation:\n{context}\n" if context else ""}
+{prev_convo}
 
 User: {query}
 """
@@ -283,7 +288,7 @@ User: {query}
 
 {style_instruction}
 
-{f"Conversation context:\n{context}\n" if context else ""}
+{convo_context}
 
 User: {query}
 """
@@ -293,7 +298,7 @@ User: {query}
 
 {style_instruction}
 
-{f"Relevant chat history:\n{context}\n" if context else ""}
+{relevant_history}
 
 User: {query}
 """
@@ -303,7 +308,7 @@ User: {query}
 
 {style_instruction}
 
-{f"Context:\n{context}\n" if context else ""}
+{search_context}
 
 User: {query}
 """
@@ -313,7 +318,7 @@ User: {query}
 
 {style_instruction}
 
-{f"Previous conversation:\n{context}\n" if context else ""}
+{prev_convo}
 
 User: {query}
 """
@@ -384,3 +389,7 @@ class ChatGraph(BaseGraph):
                 "metadata": getattr(current_state, "response_metadata", {})
             }
         )
+
+def create_chat_graph(model_manager: ModelManager, cache_manager: CacheManager) -> ChatGraph:
+    """Factory function to create a ChatGraph instance."""
+    return ChatGraph(model_manager, cache_manager)

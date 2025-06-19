@@ -410,19 +410,10 @@ def _generate_savings_tips(state: GraphState) -> list[str]:
 
 
 # Error handlers specific to chat endpoints
-@router.exception_handler(ValueError)
-async def value_error_handler(request: Request, exc: ValueError):
-    return ErrorResponse(
-        status="error",
-        message=f"Invalid input: {str(exc)}",
-        error_code="INVALID_INPUT"
-    )
-
-
-@router.exception_handler(TimeoutError)
-async def timeout_error_handler(request: Request, exc: TimeoutError):
-    return ErrorResponse(
-        status="error", 
-        message="Request timed out. Please try again with a simpler query.",
-        error_code="TIMEOUT"
-    )
+# @router.exception_handler(TimeoutError)
+# async def timeout_error_handler(request: Request, exc: TimeoutError):
+#     return ErrorResponse(
+#         status="error", 
+#         message="Request timed out. Please try again with a simpler query.",
+#         error_code="TIMEOUT"
+#     )
