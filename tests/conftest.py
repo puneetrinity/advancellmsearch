@@ -14,6 +14,7 @@ from app.models.manager import ModelManager
 from app.cache.redis_client import CacheManager
 from app.core.config import get_settings
 from app.api import security
+from app.graphs.base import GraphState
 
 
 @pytest.fixture(scope="session")
@@ -103,3 +104,18 @@ def override_get_current_user(monkeypatch):
     async def dummy_user(*args, **kwargs):
         return {"user_id": "test_user", "tier": "free"}
     monkeypatch.setattr(security, "get_current_user", dummy_user)
+
+
+@pytest.fixture
+def sample_graph_state():
+    """Create a sample GraphState for testing."""
+    return GraphState(
+        original_query="What is artificial intelligence?",
+        processed_query="What is artificial intelligence?",  # Add this line
+        user_id="test_user_123",
+        session_id="test_session_456",
+        quality_requirement="balanced",  # Use string instead of QualityLevel enum
+        cost_budget_remaining=0.5,
+        max_cost=0.5,  # Add max_cost field
+        max_execution_time=30.0
+    )

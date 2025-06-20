@@ -1,18 +1,18 @@
 # app/graphs/base.py
 """
 Base graph classes for AI Search System
-Foundation for all graph implementations
+Foundation for all graph implementations - Complete fixed version
 """
 
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Dict, Any, List, Optional, TypeVar, Generic
+from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
 import structlog
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel
 
 logger = structlog.get_logger(__name__)
@@ -29,10 +29,10 @@ class GraphType(Enum):
 
 class NodeType(Enum):
     """Node type enumeration"""
-    CONTROL = "control"
     PROCESSING = "processing"
-    INPUT = "input"
-    OUTPUT = "output"
+    DECISION = "decision"
+    IO = "io"
+    TRANSFORM = "transform"
 
 
 class NodeResult(BaseModel):
@@ -50,59 +50,83 @@ class NodeResult(BaseModel):
 @dataclass
 class GraphState:
     """Shared state across all graphs"""
-    
     # Core request data
     query_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    correlation_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     user_id: Optional[str] = None
     session_id: Optional[str] = None
     original_query: str = ""
-    
+    processed_query: Optional[str] = None
+    # Intent and complexity
+    query_intent: Optional[str] = None
+    query_complexity: float = 0.5
     # Processing context
     conversation_history: List[Dict[str, Any]] = field(default_factory=list)
     search_results: List[Dict[str, Any]] = field(default_factory=list)
     intermediate_results: Dict[str, Any] = field(default_factory=dict)
-    
     # User preferences and constraints
     user_preferences: Dict[str, Any] = field(default_factory=dict)
     cost_budget_remaining: float = 20.0
+    max_cost: Optional[float] = None  # Maximum allowed cost
     max_execution_time: float = 30.0
     quality_requirement: str = "balanced"  # minimal, balanced, high, premium
-    
     # Execution metadata
     start_time: datetime = field(default_factory=datetime.now)
     execution_path: List[str] = field(default_factory=list)
     confidence_scores: Dict[str, float] = field(default_factory=dict)
     costs_incurred: Dict[str, float] = field(default_factory=dict)
-    
+    # Enhanced execution tracking
+    node_results: Dict[str, Dict] = field(default_factory=dict)
+    execution_times: Dict[str, float] = field(default_factory=dict)
     # Cache and optimization
     cache_hits: List[str] = field(default_factory=list)
     routing_shortcuts_used: List[str] = field(default_factory=list)
-    
     # Final output
     final_response: str = ""
     response_metadata: Dict[str, Any] = field(default_factory=dict)
-    
     # Error handling
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
-    
+
     def add_execution_step(self, step_name: str, result: NodeResult):
         """Add execution step to the path"""
         self.execution_path.append(step_name)
         self.confidence_scores[step_name] = result.confidence
         self.costs_incurred[step_name] = result.cost
-        
+        self.execution_times[step_name] = result.execution_time
+        # Store complete result with timestamp
+        self.node_results[step_name] = {
+            "result": result,
+            "timestamp": datetime.now().isoformat()
+        }
         if result.error:
             self.errors.append(f"{step_name}: {result.error}")
-    
+
+    def add_cost(self, component: str, cost: float):
+        """Add cost for a specific component."""
+        if component in self.costs_incurred:
+            self.costs_incurred[component] += cost
+        else:
+            self.costs_incurred[component] = cost
+
+    def set_confidence(self, component: str, confidence: float):
+        """Set confidence score for a specific component."""
+        self.confidence_scores[component] = confidence
+
+    def is_within_budget(self, additional_cost: float = 0.0) -> bool:
+        """Check if we're within budget constraints."""
+        total_cost = self.calculate_total_cost() + additional_cost
+        max_allowed = self.max_cost if self.max_cost is not None else self.cost_budget_remaining
+        return total_cost <= max_allowed
+
     def calculate_total_cost(self) -> float:
         """Calculate total cost incurred"""
         return sum(self.costs_incurred.values())
-    
+
     def calculate_total_time(self) -> float:
         """Calculate total execution time"""
         return (datetime.now() - self.start_time).total_seconds()
-    
+
     def get_avg_confidence(self) -> float:
         """Calculate average confidence across all steps"""
         if not self.confidence_scores:
@@ -112,64 +136,34 @@ class GraphState:
 
 class BaseGraphNode(ABC):
     """Base class for all graph nodes"""
-    
     def __init__(self, name: str, node_type: str = "processing"):
         self.name = name
         self.node_type = node_type
         self.logger = structlog.get_logger(f"node.{name}")
-        # Performance tracking attributes
-        self.execution_times: List[float] = []
-        self.success_count: int = 0
-        self.failure_count: int = 0
 
-    def get_performance_stats(self) -> dict:
-        """Return performance statistics for this node."""
-        total_runs = self.success_count + self.failure_count
-        avg_time = sum(self.execution_times) / len(self.execution_times) if self.execution_times else 0.0
-        return {
-            "node_name": self.name,
-            "node_type": self.node_type,
-            "total_runs": total_runs,
-            "success_count": self.success_count,
-            "failure_count": self.failure_count,
-            "avg_execution_time": avg_time
-        }
-    
     @abstractmethod
     async def execute(self, state: GraphState, **kwargs) -> NodeResult:
         """Execute the node logic"""
         pass
-    
+
     async def __call__(self, state: GraphState, **kwargs) -> GraphState:
-        """Node execution wrapper with error handling and timing, with performance tracking."""
+        """Node execution wrapper with error handling and timing"""
         start_time = datetime.now()
-        
         try:
             self.logger.info(
                 "Node execution started",
                 node=self.name,
                 query_id=state.query_id
             )
-            
             # Execute the node logic
             result = await self.execute(state, **kwargs)
-            
             # Calculate execution time
             execution_time = (datetime.now() - start_time).total_seconds()
             result.execution_time = execution_time
-            
             # Update state
             state.add_execution_step(self.name, result)
-            
             # Store result in intermediate results
             state.intermediate_results[self.name] = result.data
-            
-            self.execution_times.append(execution_time)
-            if result.success:
-                self.success_count += 1
-            else:
-                self.failure_count += 1
-            
             self.logger.info(
                 "Node execution completed",
                 node=self.name,
@@ -179,25 +173,17 @@ class BaseGraphNode(ABC):
                 execution_time=execution_time,
                 cost=result.cost
             )
-            
             return state
-            
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
             error_msg = f"Node {self.name} failed: {str(e)}"
-            
             # Create error result
             error_result = NodeResult(
                 success=False,
                 error=error_msg,
                 execution_time=execution_time
             )
-            
             state.add_execution_step(self.name, error_result)
-            
-            self.failure_count += 1
-            self.execution_times.append(execution_time)
-            
             self.logger.error(
                 "Node execution failed",
                 node=self.name,
@@ -206,76 +192,71 @@ class BaseGraphNode(ABC):
                 execution_time=execution_time,
                 exc_info=e
             )
-            
             return state
 
 
 class BaseGraph(ABC):
     """Base class for all graph implementations"""
-    
     def __init__(self, graph_type: GraphType, name: str):
         self.graph_type = graph_type
         self.name = name
         self.logger = structlog.get_logger(f"graph.{name}")
         self.nodes: Dict[str, BaseGraphNode] = {}
         self.graph: Optional[StateGraph] = None
-        
+
     @abstractmethod
     def define_nodes(self) -> Dict[str, BaseGraphNode]:
         """Define the nodes for this graph"""
         pass
-    
+
     @abstractmethod
     def define_edges(self) -> List[tuple]:
         """Define the edges (connections) between nodes"""
         pass
-    
+
     def build(self):
-        """Build the LangGraph instance"""
+        """Build the LangGraph instance with proper START/END handling"""
         try:
             # Define nodes
             self.nodes = self.define_nodes()
-            
             # Create graph
             self.graph = StateGraph(GraphState)
-            
             # Add nodes to graph
             for node_name, node_instance in self.nodes.items():
                 self.graph.add_node(node_name, node_instance)
-            
-            # Add edges
+            # Add edges with proper START/END handling
             edges = self.define_edges()
             for edge in edges:
                 if len(edge) == 2:
-                    # Simple edge
                     from_node, to_node = edge
-                    if to_node == "END":
+                    if to_node == END or to_node == "END":
                         self.graph.add_edge(from_node, END)
+                    elif from_node == START or from_node == "START":
+                        self.graph.add_edge(START, to_node)
                     else:
                         self.graph.add_edge(from_node, to_node)
                 elif len(edge) == 3:
                     # Conditional edge
                     from_node, condition_func, mapping = edge
+                    # Update mapping to handle END constant
+                    updated_mapping = {}
+                    for condition, target in mapping.items():
+                        if target == "END" or target == END:
+                            updated_mapping[condition] = END
+                        else:
+                            updated_mapping[condition] = target
                     self.graph.add_conditional_edges(
                         from_node,
                         condition_func,
-                        mapping
+                        updated_mapping
                     )
-            
-            # Set entry point
-            if self.nodes:
-                entry_node = list(self.nodes.keys())[0]
-                self.graph.set_entry_point(entry_node)
-            
-            # Compile graph
+            # Compile graph (entry point auto-set when using START)
             self.graph = self.graph.compile()
-            
             self.logger.info(
                 "Graph built successfully",
                 graph_type=self.graph_type.value,
                 nodes=list(self.nodes.keys())
             )
-            
         except Exception as e:
             self.logger.error(
                 "Failed to build graph",
@@ -284,51 +265,41 @@ class BaseGraph(ABC):
                 exc_info=e
             )
             raise
-    
+
     async def execute(self, state: GraphState) -> GraphState:
-        """Execute the graph with the given state"""
+        """Execute the graph with global timeout."""
         if not self.graph:
             raise RuntimeError(f"Graph {self.name} not built. Call build() first.")
-        
+        import asyncio
         try:
-            self.logger.info(
-                "Graph execution started",
-                graph_type=self.graph_type.value,
-                query_id=state.query_id
+            result = await asyncio.wait_for(
+                self.graph.ainvoke(state),
+                timeout=30.0
             )
-            
-            # Execute the graph
-            result = await self.graph.ainvoke(state)
-            
-            self.logger.info(
-                "Graph execution completed",
-                graph_type=self.graph_type.value,
-                query_id=state.query_id,
-                total_cost=result.calculate_total_cost(),
-                total_time=result.calculate_total_time(),
-                avg_confidence=result.get_avg_confidence()
-            )
-            
-            return result
-            
-        except Exception as e:
-            self.logger.error(
-                "Graph execution failed",
-                graph_type=self.graph_type.value,
-                query_id=state.query_id,
-                error=str(e),
-                exc_info=e
-            )
-            
-            # Add error to state
-            state.errors.append(f"Graph {self.name} execution failed: {str(e)}")
+            # Handle LangGraph result - it might be a different type
+            if hasattr(result, '__dict__'):
+                for key, value in result.__dict__.items():
+                    if hasattr(state, key):
+                        setattr(state, key, value)
+                return state
+            else:
+                return result
+        except asyncio.TimeoutError:
+            state.errors.append("Graph execution timeout")
+            if not state.final_response:
+                state.final_response = "Request timed out. Please try again."
             return state
-    
+        except Exception as e:
+            state.errors.append(f"Graph execution failed: {str(e)}")
+            if not state.final_response:
+                state.final_response = "An error occurred during processing."
+            return state
+
     def get_execution_plan(self, state: GraphState) -> List[str]:
         """Get the planned execution path for debugging"""
         # This is a simplified version - in practice, you'd analyze the graph structure
         return list(self.nodes.keys())
-    
+
     def estimate_cost(self, state: GraphState) -> float:
         """Estimate the cost of executing this graph"""
         # Basic estimation - can be made more sophisticated

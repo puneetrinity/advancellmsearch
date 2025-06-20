@@ -6,6 +6,7 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 from typing import Dict, Any
+from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -227,53 +228,30 @@ async def liveness_check():
 
 
 @app.get("/metrics")
-async def metrics_endpoint():
+async def get_metrics():
     """Basic metrics endpoint for monitoring."""
     try:
-        metrics = {
-            "uptime": time.time() - app_state.get("startup_time", time.time()),
-            "components": {}
+        # Get graph stats
+        if hasattr(app.state, "chat_graph") and app.state.chat_graph:
+            graph_stats = app.state.chat_graph.get_performance_stats()
+        else:
+            graph_stats = {"error": "Chat graph not available"}
+        
+        # Get model stats
+        if hasattr(app.state, "model_manager") and app.state.model_manager:
+            model_stats = app.state.model_manager.get_model_stats()
+        else:
+            model_stats = {"error": "Model manager not available"}
+        
+        return {
+            "status": "operational",
+            "timestamp": datetime.now().isoformat(),
+            "graph_stats": graph_stats,
+            "model_stats": model_stats
         }
-        
-        # Model manager metrics
-        if "model_manager" in app_state:
-            model_stats = app_state["model_manager"].get_model_stats()
-            metrics["components"]["models"] = {
-                "total_models": model_stats["total_models"],
-                "loaded_models": model_stats["loaded_models"],
-                "total_requests": model_stats["performance_summary"]["total_requests"],
-                "avg_response_time": model_stats["performance_summary"].get("avg_response_time", 0),
-                "local_percentage": model_stats["performance_summary"].get("local_percentage", 0)
-            }
-        
-        # Cache manager metrics
-        if "cache_manager" in app_state and app_state["cache_manager"]:
-            cache_metrics = app_state["cache_manager"].metrics
-            metrics["components"]["cache"] = {
-                "total_requests": cache_metrics.total_requests,
-                "cache_hits": cache_metrics.cache_hits,
-                "cache_misses": cache_metrics.cache_misses,
-                "hit_rate": cache_metrics.hit_rate,
-                "avg_response_time": cache_metrics.avg_response_time
-            }
-        
-        # Chat graph metrics
-        if "chat_graph" in app_state:
-            graph_stats = app_state["chat_graph"].get_performance_stats()
-            metrics["components"]["chat_graph"] = {
-                "execution_count": graph_stats["execution_count"],
-                "success_rate": graph_stats["success_rate"],
-                "avg_execution_time": graph_stats["avg_execution_time"]
-            }
-        
-        return {"status": "success", "metrics": metrics}
-        
     except Exception as e:
-        logger.error(f"Metrics collection failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Metrics collection failed"
-        )
+        logger.error("Metrics collection failed", error=str(e))
+        raise HTTPException(status_code=500, detail="Metrics collection failed")
 
 
 # Global exception handler
