@@ -81,9 +81,21 @@ class Settings(BaseSettings):
     # Database (for future use)
     database_url: Optional[str] = None
     
+    # New search provider settings
+    BRAVE_API_KEY: Optional[str] = None
+    SCRAPINGBEE_API_KEY: Optional[str] = None
+    # Performance settings
+    CACHE_TTL: int = 3600
+    MAX_CACHE_SIZE: int = 50000
+    PERFORMANCE_MONITORING: bool = True
+    # Search settings
+    DEFAULT_SEARCH_BUDGET: float = 2.0
+    DEFAULT_QUALITY_REQUIREMENT: str = "standard"
+    MAX_SEARCH_RESULTS: int = 10
+    
     model_config = {
         "env_file": ".env",
-        "case_sensitive": False,
+        "case_sensitive": True,
         "protected_namespaces": ("settings_",),
         "env_prefix": "",
         "populate_by_name": True,

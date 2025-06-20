@@ -860,206 +860,138 @@ class SearchGraph(BaseGraph):
         return "has_content" if has_content else "no_content"
 
 
-# Search Provider Implementations
+"""
+SearchGraph Main Implementation
+Main search graph orchestrator that coordinates the search workflow
+"""
 
-class BaseSearchProvider:
-    """Base class for search providers"""
-    
-    def __init__(self):
-        self.cost_per_search = 0.008  # Default cost
-    
-    async def search(self, query: SearchQuery) -> List[SearchResult]:
-        """Perform search and return results"""
-        raise NotImplementedError
-    
-    def is_available(self) -> bool:
-        """Check if provider is available"""
-        return True
-    
-    def get_cost(self) -> float:
-        """Get cost of last search"""
-        return self.cost_per_search
+import asyncio
+import time
+from typing import Dict, List, Any
+import logging
 
+from .nodes.search_nodes import (
+    GraphContext,
+    SearchRouterNode,
+    PrimarySearchNode,
+    AnalyzeResultsNode,
+    SynthesizeResponseNode,
+    FallbackSearchNode,
+    NodeStatus
+)
+from app.providers.router import SmartSearchRouter
 
-class BraveSearchProvider(BaseSearchProvider):
-    """Brave Search API provider"""
-    
-    def __init__(self):
-        super().__init__()
-        self.api_key = get_settings().brave_search_api_key
-        self.base_url = "https://api.search.brave.com/res/v1/web/search"
-        self.cost_per_search = 0.008
-    
-    async def search(self, query: SearchQuery) -> List[SearchResult]:
-        """Search using Brave Search API"""
-        if not self.api_key:
-            raise Exception("Brave Search API key not configured")
-        
-        results = []
-        
-        for search_term in query.expanded_queries[:2]:  # Limit to 2 queries
-            try:
-                params = {
-                    "q": search_term,
-                    "count": min(query.max_results, 10),
-                    "country": "US",
-                    "search_lang": query.language,
-                    "ui_lang": query.language
-                }
-                
-                headers = {
-                    "Accept": "application/json",
-                    "Accept-Encoding": "gzip",
-                    "X-Subscription-Token": self.api_key
-                }
-                
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(self.base_url, params=params, headers=headers) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            
-                            for item in data.get("web", {}).get("results", []):
-                                result = SearchResult(
-                                    title=item.get("title", ""),
-                                    url=item.get("url", ""),
-                                    snippet=item.get("description", ""),
-                                    source="brave",
-                                    metadata={
-                                        "published": item.get("age"),
-                                        "language": item.get("language")
-                                    }
-                                )
-                                results.append(result)
-                        else:
-                            logger.warning(f"Brave Search API error: {response.status}")
-                            
-            except Exception as e:
-                logger.error(f"Brave Search error: {e}")
-        
-        return results
-    
-    def is_available(self) -> bool:
-        """Check if Brave Search is available"""
-        return bool(self.api_key)
+logger = logging.getLogger(__name__)
 
-
-class DuckDuckGoProvider(BaseSearchProvider):
-    """DuckDuckGo search provider (free, no API key required)"""
-    
-    def __init__(self):
-        super().__init__()
-        self.cost_per_search = 0.0  # Free
-    
-    async def search(self, query: SearchQuery) -> List[SearchResult]:
-        """Search using DuckDuckGo (simplified implementation)"""
-        results = []
-        
+class SearchGraph:
+    """Main search graph orchestrator"""
+    def __init__(self, search_router: SmartSearchRouter):
+        self.search_router = search_router
+        self.nodes = {}
+        self.execution_results = {}
+        self._setup_graph()
+    def _setup_graph(self):
+        """Setup the search graph with all nodes"""
+        self.nodes = {
+            "search_router": SearchRouterNode(),
+            "primary_search": PrimarySearchNode(search_router=self.search_router),
+            "analyze_results": AnalyzeResultsNode(),
+            "synthesize_response": SynthesizeResponseNode(),
+            "fallback_search": FallbackSearchNode()
+        }
+        self.nodes["primary_search"].add_dependency("search_router")
+        self.nodes["analyze_results"].add_dependency("primary_search")
+        self.nodes["synthesize_response"].add_dependency("analyze_results")
+        self.nodes["fallback_search"].add_dependency("primary_search")
+    async def execute(self, query: str, **kwargs) -> Dict[str, Any]:
+        start_time = time.time()
+        context = GraphContext(
+            query=query,
+            user_budget=kwargs.get("budget", 2.0),
+            quality_requirement=kwargs.get("quality", "standard"),
+            max_results=kwargs.get("max_results", 10),
+            conversation_history=kwargs.get("history", [])
+        )
+        logger.info(f"🚀 Starting SearchGraph execution for: '{query}'")
         try:
-            # This is a simplified implementation
-            # In production, you'd use a proper DDG API wrapper
-            search_url = "https://html.duckduckgo.com/html/"
-            
-            for search_term in query.expanded_queries[:1]:  # Limit to 1 query for free tier
-                params = {
-                    "q": search_term
-                }
-                
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (compatible; AI-Search-Bot/1.0)"
-                }
-                
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(search_url, params=params, headers=headers) as response:
-                        if response.status == 200:
-                            html = await response.text()
-                            soup = BeautifulSoup(html, 'html.parser')
-                            
-                            # Parse DuckDuckGo results (simplified)
-                            for result_div in soup.find_all('div', class_='result')[:query.max_results]:
-                                title_elem = result_div.find('a', class_='result__a')
-                                snippet_elem = result_div.find('a', class_='result__snippet')
-                                
-                                if title_elem:
-                                    result = SearchResult(
-                                        title=title_elem.get_text(strip=True),
-                                        url=title_elem.get('href', ''),
-                                        snippet=snippet_elem.get_text(strip=True) if snippet_elem else "",
-                                        source="duckduckgo"
-                                    )
-                                    results.append(result)
-                        
+            execution_path = await self._execute_graph(context)
+            context.execution_time = time.time() - start_time
+            final_result = {
+                "query": query,
+                "response": self._get_final_response(context),
+                "citations": context.citations,
+                "metadata": {
+                    "execution_time": context.execution_time,
+                    "total_cost": context.total_cost,
+                    "execution_path": execution_path,
+                    "results_count": len(context.search_results),
+                    "confidence_score": self._get_confidence_score(context),
+                    "analysis": context.analysis
+                },
+                "performance_metrics": self._get_performance_metrics(context)
+            }
+            logger.info(f"✅ SearchGraph completed in {context.execution_time:.2f}s, cost: ₹{context.total_cost:.2f}")
+            return final_result
         except Exception as e:
-            logger.error(f"DuckDuckGo search error: {e}")
-        
-        return results
-
-
-class GoogleSearchProvider(BaseSearchProvider):
-    """Google Custom Search API provider"""
-    
-    def __init__(self):
-        super().__init__()
-        self.api_key = get_settings().google_search_api_key if hasattr(get_settings(), 'google_search_api_key') else None
-        self.search_engine_id = get_settings().google_search_engine_id if hasattr(get_settings(), 'google_search_engine_id') else None
-        self.base_url = "https://www.googleapis.com/customsearch/v1"
-        self.cost_per_search = 0.005
-    
-    async def search(self, query: SearchQuery) -> List[SearchResult]:
-        """Search using Google Custom Search API"""
-        if not self.api_key or not self.search_engine_id:
-            raise Exception("Google Search API not properly configured")
-        
-        results = []
-        
-        for search_term in query.expanded_queries[:1]:  # Limit due to API quotas
-            try:
-                params = {
-                    "key": self.api_key,
-                    "cx": self.search_engine_id,
-                    "q": search_term,
-                    "num": min(query.max_results, 10)
+            logger.error(f"❌ SearchGraph execution failed: {str(e)}")
+            return {
+                "query": query,
+                "response": f"I encountered an error while searching: {str(e)}",
+                "citations": [],
+                "metadata": {
+                    "execution_time": time.time() - start_time,
+                    "total_cost": 0.0,
+                    "error": str(e)
                 }
-                
-                # Add time filter if specified
-                if query.time_filter:
-                    params["dateRestrict"] = query.time_filter
-                
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(self.base_url, params=params) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            
-                            for item in data.get("items", []):
-                                result = SearchResult(
-                                    title=item.get("title", ""),
-                                    url=item.get("link", ""),
-                                    snippet=item.get("snippet", ""),
-                                    source="google",
-                                    metadata={
-                                        "published": item.get("pagemap", {}).get("metatags", [{}])[0].get("article:published_time"),
-                                        "image": item.get("pagemap", {}).get("cse_image", [{}])[0].get("src")
-                                    }
-                                )
-                                results.append(result)
-                        else:
-                            logger.warning(f"Google Search API error: {response.status}")
-                            
-            except Exception as e:
-                logger.error(f"Google Search error: {e}")
-        
-        return results
-    
-    def is_available(self) -> bool:
-        """Check if Google Search is available"""
-        return bool(self.api_key and self.search_engine_id)
-
-
-# Helper function to create and build search graph
-async def create_search_graph(
-    model_manager: ModelManager, 
-    cache_manager: CacheManager
-) -> SearchGraph:
-    """Create and build a search graph instance"""
-    graph = SearchGraph(model_manager, cache_manager)
-    graph.build()
-    return graph
+            }
+    async def _execute_graph(self, context: GraphContext) -> List[str]:
+        execution_path = []
+        current_nodes = ["search_router"]
+        while current_nodes:
+            next_nodes = []
+            for node_id in current_nodes:
+                if node_id not in self.nodes:
+                    continue
+                node = self.nodes[node_id]
+                if not self._dependencies_satisfied(node, execution_path):
+                    continue
+                if not node.should_execute(context):
+                    logger.info(f"⏭️  Skipping node {node_id} (conditions not met)")
+                    continue
+                logger.info(f"🔄 Executing node: {node_id}")
+                result = await node.execute(context)
+                self.execution_results[node_id] = result
+                execution_path.append(node_id)
+                if result.status == NodeStatus.COMPLETED:
+                    next_nodes.extend(result.next_nodes)
+                    logger.info(f"✅ Node {node_id} completed in {result.execution_time:.2f}s")
+                else:
+                    logger.error(f"❌ Node {node_id} failed: {result.error}")
+                    break
+            current_nodes = list(set(next_nodes))
+        return execution_path
+    def _dependencies_satisfied(self, node, execution_path: List[str]) -> bool:
+        return all(dep in execution_path for dep in node.dependencies)
+    def _get_final_response(self, context: GraphContext) -> str:
+        synthesize_result = self.execution_results.get("synthesize_response")
+        if synthesize_result and synthesize_result.status == NodeStatus.COMPLETED:
+            return synthesize_result.data.get("synthesized_response", "No response generated.")
+        if context.search_results:
+            return f"I found {len(context.search_results)} results for your query about '{context.query}'."
+        else:
+            return "I couldn't find any relevant information for your query."
+    def _get_confidence_score(self, context: GraphContext) -> float:
+        synthesize_result = self.execution_results.get("synthesize_response")
+        if synthesize_result and synthesize_result.status == NodeStatus.COMPLETED:
+            return synthesize_result.data.get("confidence_score", 0.0)
+        return 0.0
+    def _get_performance_metrics(self, context: GraphContext) -> Dict[str, Any]:
+        metrics = {
+            "node_execution_times": {},
+            "total_nodes_executed": len(self.execution_results),
+            "successful_nodes": sum(1 for r in self.execution_results.values() if r.status == NodeStatus.COMPLETED),
+            "failed_nodes": sum(1 for r in self.execution_results.values() if r.status == NodeStatus.FAILED)
+        }
+        for node_id, result in self.execution_results.items():
+            metrics["node_execution_times"][node_id] = result.execution_time
+        return metrics

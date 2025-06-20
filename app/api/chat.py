@@ -7,7 +7,7 @@ import json
 import time
 import uuid
 from typing import Any, Dict, List, Optional, AsyncGenerator
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sse_starlette.sse import EventSourceResponse
@@ -15,7 +15,6 @@ from sse_starlette.sse import EventSourceResponse
 from app.core.logging import get_logger, get_correlation_id, set_correlation_id, log_performance
 from app.core.config import get_settings
 from app.api.security import get_current_user, SecureChatInput, check_content_policy
-from app.graphs.base import GraphState
 from app.models.manager import QualityLevel
 from app.graphs.chat_graph import ChatGraph
 from app.models.manager import ModelManager
@@ -25,6 +24,7 @@ from app.schemas.responses import (
     ResponseMetadata, CostPrediction, DeveloperHints, create_success_response,
     create_error_response, ConversationContext
 )
+from app.performance.optimization import OptimizedSearchSystem
 
 
 router = APIRouter()
@@ -341,6 +341,53 @@ async def chat_complete(
                 ]
             ).dict()
         )
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat_endpoint(
+    request: ChatRequest,
+    req: Request
+) -> ChatResponse:
+    """Enhanced chat endpoint with search integration"""
+    try:
+        search_system: Optional[OptimizedSearchSystem] = getattr(req.app.state, 'search_system', None)
+        if not search_system:
+            logger.warning("Search system not available, using fallback")
+            return await fallback_chat_response(request)
+        result = await search_system.execute_optimized_search(
+            query=request.message,
+            budget=getattr(request, 'budget', 2.0),
+            quality=getattr(request, 'quality_requirement', 'standard'),
+            max_results=getattr(request, 'max_results', 10)
+        )
+        chat_response = ChatResponse(
+            message=result["response"],
+            query_id=f"search_{int(time.time())}",
+            model_used=result["metadata"].get("provider_used", "search"),
+            response_time=result["metadata"]["execution_time"],
+            cost=result["metadata"]["total_cost"],
+            citations=result.get("citations", []),
+            metadata={
+                "search_enabled": True,
+                "execution_path": result["metadata"].get("execution_path", []),
+                "confidence_score": result["metadata"].get("confidence_score", 0.0),
+                "performance_metrics": result.get("performance_metrics", {})
+            }
+        )
+        return chat_response
+    except Exception as e:
+        logger.error(f"Chat endpoint error: {str(e)}")
+        return await fallback_chat_response(request)
+
+async def fallback_chat_response(request: ChatRequest) -> ChatResponse:
+    return ChatResponse(
+        message="I'm experiencing some technical difficulties with my search capabilities. How else can I help you?",
+        query_id=f"fallback_{int(time.time())}",
+        model_used="fallback",
+        response_time=0.1,
+        cost=0.0,
+        metadata={"search_enabled": False, "fallback_used": True}
+    )
 
 
 @router.post("/stream")

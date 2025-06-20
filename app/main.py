@@ -7,6 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import Dict, Any
 from datetime import datetime
+import os
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +23,9 @@ from app.models.manager import ModelManager
 from app.cache.redis_client import CacheManager
 from app.graphs.chat_graph import ChatGraph
 from app.schemas.responses import HealthStatus, create_error_response
+from app.providers.router import SmartSearchRouter
+from app.graphs.search_graph import SearchGraph
+from app.performance.optimization import OptimizedSearchSystem
 
 
 # Global state for application components
@@ -76,6 +80,19 @@ async def lifespan(app: FastAPI):
         # Set dependencies for API modules
         chat.set_dependencies(model_manager, app_state["cache_manager"], chat_graph)
         
+        # Initialize search system components
+        logger.info("🔍 Initializing search system components...")
+        search_router_instance = SmartSearchRouter(
+            brave_api_key=os.getenv("BRAVE_API_KEY", settings.brave_search_api_key or settings.BRAVE_API_KEY),
+            scrapingbee_api_key=os.getenv("SCRAPINGBEE_API_KEY", getattr(settings, "SCRAPINGBEE_API_KEY", None))
+        )
+        await search_router_instance.__aenter__()
+        search_graph = SearchGraph(search_router_instance)
+        optimized_system = OptimizedSearchSystem(search_router_instance, search_graph)
+        app_state["search_system"] = optimized_system
+        app_state["search_router"] = search_router_instance
+        logger.info("✅ Search system components initialized")
+        
         # Application startup complete
         startup_time = time.time()
         app_state["startup_time"] = startup_time
@@ -103,6 +120,11 @@ async def lifespan(app: FastAPI):
             # Note: CacheManager cleanup would go here if implemented
             logger.info("✅ Cache manager cleaned up")
         
+        # Cleanup search router
+        if "search_router" in app_state and app_state["search_router"]:
+            await app_state["search_router"].__aexit__(None, None, None)
+            logger.info("✅ Search system cleaned up")
+        
         logger.info("✅ AI Search System shutdown completed")
         
     except Exception as e:
@@ -112,10 +134,8 @@ async def lifespan(app: FastAPI):
 # Create FastAPI application
 app = FastAPI(
     title="AI Search System",
-    description="Intelligent search system with conversation capabilities",
+    description="Intelligent AI-powered search with cost optimization",
     version="1.0.0",
-    docs_url="/docs" if settings.environment != "production" else None,
-    redoc_url="/redoc" if settings.environment != "production" else None,
     lifespan=lifespan
 )
 
@@ -183,6 +203,13 @@ async def health_check():
             components["chat_graph"] = "healthy"
         else:
             components["chat_graph"] = "not_initialized"
+            overall_healthy = False
+        
+        # Check search system
+        if "search_system" in app_state and app_state["search_system"]:
+            components["search_system"] = "healthy"
+        else:
+            components["search_system"] = "not_initialized"
             overall_healthy = False
         
         # Calculate uptime
@@ -408,6 +435,12 @@ if settings.environment != "production":
                 debug_state[key] = {
                     "type": "ChatGraph",
                     "stats": value.get_performance_stats() if hasattr(value, 'get_performance_stats') else None
+                }
+            elif key == "search_system":
+                debug_state[key] = {
+                    "type": "OptimizedSearchSystem",
+                    "available": value is not None,
+                    "status": value.get_system_status() if hasattr(value, 'get_system_status') else None
                 }
             else:
                 debug_state[key] = str(type(value))
