@@ -15,11 +15,12 @@ from datetime import datetime
 from app.core.logging import get_logger, get_correlation_id, set_correlation_id, log_performance
 from app.core.config import get_settings
 from app.core.async_utils import ensure_awaited, safe_execute, safe_graph_execute, coroutine_safe
-from app.api.security import get_current_user, SecureChatInput, check_content_policy
+from app.api.security import get_current_user, check_content_policy
 from app.models.manager import QualityLevel
 from app.graphs.chat_graph import ChatGraph
 from app.models.manager import ModelManager
 from app.cache.redis_client import CacheManager
+from app.schemas.requests import ChatRequest, ChatStreamRequest
 from app.schemas.responses import (
     ChatResponse, ChatData, StreamingChatResponse, 
     ResponseMetadata, CostPrediction, DeveloperHints, 
@@ -27,7 +28,6 @@ from app.schemas.responses import (
 )
 from app.performance.optimization import OptimizedSearchSystem
 from app.graphs.base import GraphState
-
 
 router = APIRouter()
 logger = get_logger("api.chat")
@@ -39,53 +39,6 @@ cache_manager: Optional[CacheManager] = None
 chat_graph: Optional[ChatGraph] = None
 
 # CORRECTED REQUEST MODELS WITH PROPER WRAPPERS
-class ChatRequest(SecureChatInput):
-    """Non-streaming chat request with comprehensive options."""
-    session_id: Optional[str] = Field(None, description="Conversation session ID")
-    user_context: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional user context")
-    quality_requirement: Optional[str] = Field("balanced", description="Quality level: minimal, balanced, high, premium")
-    max_cost: Optional[float] = Field(0.10, ge=0.0, le=1.0, description="Maximum cost in INR")
-    max_execution_time: Optional[float] = Field(30.0, ge=1.0, le=120.0, description="Maximum execution time")
-    force_local_only: Optional[bool] = Field(False, description="Force local models only")
-    response_style: Optional[str] = Field("balanced", description="Response style: concise, balanced, detailed")
-    include_sources: Optional[bool] = Field(True, description="Include sources and citations")
-    include_debug_info: Optional[bool] = Field(False, description="Include debug information")
-
-    @field_validator('quality_requirement')
-    @classmethod
-    def validate_quality(cls, v):
-        valid_qualities = ["minimal", "balanced", "high", "premium"]
-        if v not in valid_qualities:
-            raise ValueError(f"Quality must be one of: {valid_qualities}")
-        return v
-
-    @field_validator('response_style')
-    @classmethod
-    def validate_style(cls, v):
-        valid_styles = ["concise", "balanced", "detailed"]
-        if v not in valid_styles:
-            raise ValueError(f"Style must be one of: {valid_styles}")
-        return v
-
-class StreamingChatRequest(BaseModel):
-    messages: List[Dict[str, str]] = Field(..., description="Conversation messages")
-    model: Optional[str] = Field("auto", description="Model preference")
-    max_tokens: Optional[int] = Field(300, ge=1, le=2000)
-    temperature: Optional[float] = Field(0.7, ge=0.0, le=2.0)
-    stream: bool = Field(True, description="Enable streaming")
-    session_id: Optional[str] = Field(None, description="Session ID")
-
-    @field_validator('messages')
-    @classmethod
-    def validate_messages(cls, v):
-        if not v:
-            raise ValueError("Messages cannot be empty")
-        for msg in v:
-            if not isinstance(msg, dict) or 'role' not in msg or 'content' not in msg:
-                raise ValueError("Each message must have 'role' and 'content'")
-            if msg['role'] not in ['user', 'assistant', 'system']:
-                raise ValueError("Role must be 'user', 'assistant', or 'system'")
-        return v
 
 async def initialize_chat_dependencies():
     global model_manager, cache_manager, chat_graph
@@ -122,9 +75,14 @@ async def chat_health():
 async def chat_complete(
     req: Request,
     background_tasks: BackgroundTasks,
-    chat_request: ChatRequest = Body(..., embed=False),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
+    # Parse request body manually to avoid FastAPI wrapper
+    try:
+        data = await req.json()
+        chat_request = ChatRequest(**data)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Invalid request body: {str(e)}")
     query_id = str(uuid.uuid4())
     correlation_id = get_correlation_id()
     start_time = time.time()
@@ -254,7 +212,7 @@ async def chat_complete(
         background_tasks.add_task(
             log_chat_analytics,
             query_id,
-            request.message,
+            chat_request.message,  # FIXED: was request.message
             chat_result.final_response,
             execution_time,
             total_cost
@@ -292,8 +250,9 @@ async def chat_complete(
 @router.post("/stream")
 @coroutine_safe(timeout=120.0)
 async def chat_stream(
-    request: StreamingChatRequest,
+    *,
     req: Request,
+    streaming_request: ChatStreamRequest,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     correlation_id = str(uuid.uuid4())
@@ -303,7 +262,7 @@ async def chat_stream(
     async def generate_safe_stream():
         try:
             user_message = ""
-            for msg in reversed(request.messages):
+            for msg in reversed(streaming_request.messages):
                 if msg["role"] == "user":
                     user_message = msg["content"]
                     break
@@ -311,9 +270,9 @@ async def chat_stream(
             if not policy_check["passed"]:
                 yield _create_error_stream_chunk("Content violates policy")
                 return
-            session_id = request.session_id or f"stream_{current_user['user_id']}_{int(time.time())}"
+            session_id = streaming_request.session_id or f"stream_{current_user['user_id']}_{int(time.time())}"
             conversation_history = []
-            for msg in request.messages[:-1]:
+            for msg in streaming_request.messages[:-1]:
                 conversation_history.append({
                     "role": msg["role"],
                     "content": msg["content"],
@@ -468,3 +427,19 @@ async def clear_conversation_history(
     except Exception as e:
         logger.error(f"Error clearing history: {e}")
         raise HTTPException(status_code=500, detail="Failed to clear conversation history")
+
+def set_dependencies(
+    fake_model_manager=None,
+    fake_cache_manager=None,
+    fake_chat_graph=None
+):
+    """
+    Override global dependencies for testing. Injects fake services for model_manager, cache_manager, and chat_graph.
+    """
+    global model_manager, cache_manager, chat_graph
+    if fake_model_manager is not None:
+        model_manager = fake_model_manager
+    if fake_cache_manager is not None:
+        cache_manager = fake_cache_manager
+    if fake_chat_graph is not None:
+        chat_graph = fake_chat_graph

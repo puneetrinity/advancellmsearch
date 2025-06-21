@@ -102,7 +102,7 @@ class ChatStreamRequest(BaseModel):
         return v
 
 
-class SearchRequest(BaseModel):
+class SearchRequest(SecureTextInput):
     """Search request model for /api/v1/search/basic endpoint."""
     query: str = Field(..., min_length=1, max_length=500, description="Search query")
     max_results: Optional[int] = Field(10, ge=1, le=50, description="Maximum number of results")

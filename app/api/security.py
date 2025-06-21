@@ -537,6 +537,12 @@ def require_tier(min_tier: str):
 # Input validation models
 class SecureTextInput(BaseModel):
     """Base model with security validation for text inputs."""
+    # Optional authentication fields (handled by middleware)
+    scheme: Optional[str] = Field(None, description="Authentication scheme (auto-filled)")
+    credentials: Optional[str] = Field(None, description="Authentication credentials (auto-filled)")
+    
+
+    """Base model with security validation for text inputs."""
     
     @field_validator('*', mode='before')
     @classmethod

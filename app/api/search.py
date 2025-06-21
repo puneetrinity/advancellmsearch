@@ -10,28 +10,15 @@ import uuid
 import logging
 import asyncio
 
-from app.api.security import get_current_user, require_permission, SecureTextInput
+from app.api.security import get_current_user, require_permission
 from app.schemas.responses import SearchResponse, SearchData, create_success_response, create_error_response
 from app.core.logging import get_logger, get_correlation_id, log_performance
 from app.core.async_utils import ensure_awaited, safe_execute, coroutine_safe, AsyncSafetyValidator
 from app.schemas.requests import SearchRequest
+import json
 
 router = APIRouter()
 logger = get_logger("api.search")
-
-# CORRECTED REQUEST MODELS
-class AdvancedSearchRequest(SecureTextInput):
-    query: str = Field(..., min_length=1, max_length=500)
-    filters: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Search filters")
-    date_range: Optional[Dict[str, str]] = Field(None, description="Date range for results")
-    domains: Optional[List[str]] = Field(None, description="Specific domains to search")
-    language: Optional[str] = Field("en", description="Language preference")
-    safe_search: Optional[bool] = Field(True, description="Enable safe search filtering")
-    budget: Optional[float] = Field(2.0, ge=0.1, le=10.0, description="Search budget in rupees")
-    quality: Optional[str] = Field("premium", description="Search quality: basic, standard, premium")
-
-class SimpleSearchRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=200)
 
 @router.get("/health")
 async def search_health(request: Request):
@@ -51,9 +38,14 @@ async def search_health(request: Request):
 @coroutine_safe(timeout=60.0)
 async def basic_search(
     req: Request,
-    search_request: SearchRequest = Body(..., embed=False),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
+    # Parse request body manually to avoid FastAPI wrapper
+    try:
+        data = await req.json()
+        search_request = SearchRequest(**data)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Invalid request body: {str(e)}")
     query_id = str(uuid.uuid4())
     correlation_id = get_correlation_id()
     start_time = time.time()
@@ -86,7 +78,7 @@ async def basic_search(
                 response_text = "Search completed"
                 citations = []
                 metadata = {}
-            search_data = SearchData(
+            search_data_obj = SearchData(
                 query=search_request.query,
                 results=[],
                 summary=response_text,
@@ -103,7 +95,7 @@ async def basic_search(
                 "confidence": metadata.get("confidence", 1.0),
             }
             return create_success_response(
-                data=search_data,
+                data=search_data_obj,
                 metadata=response_metadata
             )
         else:
@@ -124,8 +116,8 @@ async def basic_search(
 @log_performance("advanced_search")
 @coroutine_safe(timeout=120.0)
 async def advanced_search(
-    request: AdvancedSearchRequest,
     req: Request,
+    body: SearchRequest = Body(..., embed=False),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     query_id = str(uuid.uuid4())
@@ -133,11 +125,11 @@ async def advanced_search(
     start_time = time.time()
     logger.info(
         "Advanced search initiated",
-        query=request.query,
+        query=body.query,
         user_id=current_user["user_id"],
-        filters=request.filters,
-        budget=request.budget,
-        quality=request.quality,
+        filters=body.filters,
+        budget=body.budget,
+        quality=body.quality,
         query_id=query_id,
         correlation_id=correlation_id
     )
@@ -145,25 +137,25 @@ async def advanced_search(
         search_system = getattr(req.app.state, 'search_system', None)
         if search_system:
             enhanced_query = _enhance_query_with_filters(
-                request.query, 
-                request.filters, 
-                request.domains
+                body.query, 
+                body.filters, 
+                body.domains
             )
             search_result = await safe_execute(
                 search_system.execute_optimized_search,
                 query=enhanced_query,
-                budget=request.budget,
-                quality=request.quality,
+                budget=body.budget,
+                quality=body.quality,
                 max_results=20,
                 timeout=60.0
             )
             search_result = await ensure_awaited(search_result)
             advanced_results = _filter_advanced_results(
                 search_result.get("citations", []), 
-                request
+                body
             )
-            search_data = SearchData(
-                query=request.query,
+            search_data_obj = SearchData(
+                query=body.query,
                 results=advanced_results,
                 summary=f"Advanced search found {len(advanced_results)} filtered results. {search_result['response']}" if len(advanced_results) > 0 else "No results found matching your advanced criteria.",
                 total_results=len(advanced_results),
@@ -172,7 +164,7 @@ async def advanced_search(
             )
             response = SearchResponse(
                 status="success",
-                data=search_data,
+                data=search_data_obj,
                 metadata={
                     "query_id": query_id,
                     "correlation_id": correlation_id,
@@ -183,13 +175,13 @@ async def advanced_search(
                     "cached": False,
                     "search_provider": search_result["metadata"].get("provider_used", "multi"),
                     "enhanced": search_result["metadata"].get("enhanced", False),
-                    "advanced_filters": request.filters,
+                    "advanced_filters": body.filters,
                     "search_enabled": True
                 }
             )
         else:
-            search_data = SearchData(
-                query=request.query,
+            search_data_obj = SearchData(
+                query=body.query,
                 results=[],
                 summary="Advanced search system is initializing. Please try again shortly.",
                 total_results=0,
@@ -198,7 +190,7 @@ async def advanced_search(
             )
             response = SearchResponse(
                 status="success",
-                data=search_data,
+                data=search_data_obj,
                 metadata={
                     "query_id": query_id,
                     "correlation_id": correlation_id,
@@ -226,7 +218,7 @@ async def advanced_search(
         )
 
 @router.post("/test")
-async def search_test(request: SimpleSearchRequest):
+async def search_test(*, request: SearchRequest):
     return {
         "status": "success",
         "query": request.query,
@@ -252,18 +244,18 @@ def _enhance_query_with_filters(
         enhanced += f" ({domain_filter})"
     return enhanced
 
-def _filter_advanced_results(citations: List[Dict], request: AdvancedSearchRequest) -> List[Dict]:
+def _filter_advanced_results(citations: List[Dict], advanced_data: SearchRequest) -> List[Dict]:
     filtered_results = []
     for citation in citations:
-        if request.date_range:
+        if advanced_data.date_range:
             pass
-        if request.domains:
+        if advanced_data.domains:
             citation_url = citation.get("url", "")
-            if not any(domain in citation_url for domain in request.domains):
+            if not any(domain in citation_url for domain in advanced_data.domains):
                 continue
-        if request.language and request.language != "en":
+        if advanced_data.language and advanced_data.language != "en":
             pass
-        if request.safe_search:
+        if advanced_data.safe_search:
             pass
         filtered_results.append(citation)
     return filtered_results
