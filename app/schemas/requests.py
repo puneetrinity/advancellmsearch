@@ -6,6 +6,7 @@ Pydantic models for request validation
 
 from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field, field_validator
+from app.api.security import SecureTextInput
 
 
 class Constraints(BaseModel):
@@ -101,34 +102,28 @@ class ChatStreamRequest(BaseModel):
         return v
 
 
-class SearchRequest(BaseModel):
-    """Search analysis request"""
-    query: str = Field(..., description="Search query", min_length=1, max_length=500)
-    search_depth: Optional[str] = Field("balanced", description="Search depth: shallow, balanced, deep, comprehensive")
-    sources: Optional[List[str]] = Field(["web"], description="Sources to search: web, academic, news, technical")
-    analysis_type: Optional[str] = Field("summary", description="Analysis type: summary, detailed, comparative")
-    constraints: Optional[Constraints] = Field(None, description="Request constraints")
+class SearchRequest(SecureTextInput):
+    """Search request model for /api/v1/search/basic endpoint."""
+    query: str = Field(..., min_length=1, max_length=500, description="Search query")
+    max_results: Optional[int] = Field(10, ge=1, le=50, description="Maximum number of results")
+    search_type: Optional[str] = Field("web", description="Type of search: web, academic, news")
+    include_summary: Optional[bool] = Field(True, description="Whether to include AI summary")
+    budget: Optional[float] = Field(2.0, ge=0.1, le=10.0, description="Search budget in rupees")
+    quality: Optional[str] = Field("standard", description="Search quality: basic, standard, premium")
     session_id: Optional[str] = Field(None, description="Session ID")
     
-    @field_validator('search_depth')
-    def validate_search_depth(cls, v):
-        allowed = ["shallow", "balanced", "deep", "comprehensive"]
+    @field_validator('search_type')
+    def validate_search_type(cls, v):
+        allowed = ["web", "academic", "news"]
         if v not in allowed:
-            raise ValueError(f"Search depth must be one of: {allowed}")
+            raise ValueError(f"Search type must be one of: {allowed}")
         return v
     
-    @field_validator('analysis_type')
-    def validate_analysis_type(cls, v):
-        allowed = ["summary", "detailed", "comparative", "analytical"]
+    @field_validator('quality')
+    def validate_quality(cls, v):
+        allowed = ["basic", "standard", "premium"]
         if v not in allowed:
-            raise ValueError(f"Analysis type must be one of: {allowed}")
-        return v
-    
-    @field_validator('sources')
-    def validate_sources(cls, v):
-        allowed = ["web", "academic", "news", "technical", "social"]
-        if not all(source in allowed for source in v):
-            raise ValueError(f"All sources must be from: {allowed}")
+            raise ValueError(f"Quality must be one of: {allowed}")
         return v
 
 

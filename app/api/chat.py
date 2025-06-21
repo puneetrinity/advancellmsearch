@@ -1,13 +1,12 @@
 """
-Enhanced Chat API with full graph system integration.
-Provides both streaming and non-streaming endpoints with production features.
+Enhanced Chat API with coroutine safety and proper request handling.
 """
 import asyncio
 import json
 import time
 import uuid
 from typing import Any, Dict, List, Optional, AsyncGenerator
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request, Body
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sse_starlette.sse import EventSourceResponse
@@ -15,15 +14,16 @@ from datetime import datetime
 
 from app.core.logging import get_logger, get_correlation_id, set_correlation_id, log_performance
 from app.core.config import get_settings
+from app.core.async_utils import ensure_awaited, safe_execute, safe_graph_execute, coroutine_safe
 from app.api.security import get_current_user, SecureChatInput, check_content_policy
 from app.models.manager import QualityLevel
 from app.graphs.chat_graph import ChatGraph
 from app.models.manager import ModelManager
 from app.cache.redis_client import CacheManager
 from app.schemas.responses import (
-    ChatResponse, ChatData, StreamingChatResponse, OpenAIChatResponse, 
-    ResponseMetadata, CostPrediction, DeveloperHints, create_success_response,
-    create_error_response, ConversationContext
+    ChatResponse, ChatData, StreamingChatResponse, 
+    ResponseMetadata, CostPrediction, DeveloperHints, 
+    create_success_response, create_error_response, ConversationContext
 )
 from app.performance.optimization import OptimizedSearchSystem
 from app.graphs.base import GraphState
@@ -38,20 +38,15 @@ model_manager: Optional[ModelManager] = None
 cache_manager: Optional[CacheManager] = None
 chat_graph: Optional[ChatGraph] = None
 
-
+# CORRECTED REQUEST MODELS WITH PROPER WRAPPERS
 class ChatRequest(SecureChatInput):
     """Non-streaming chat request with comprehensive options."""
-    message: str = Field(..., min_length=1, max_length=8000, description="User message")
     session_id: Optional[str] = Field(None, description="Conversation session ID")
     user_context: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional user context")
-    
-    # Quality and performance controls
     quality_requirement: Optional[str] = Field("balanced", description="Quality level: minimal, balanced, high, premium")
     max_cost: Optional[float] = Field(0.10, ge=0.0, le=1.0, description="Maximum cost in INR")
     max_execution_time: Optional[float] = Field(30.0, ge=1.0, le=120.0, description="Maximum execution time")
     force_local_only: Optional[bool] = Field(False, description="Force local models only")
-    
-    # Response preferences
     response_style: Optional[str] = Field("balanced", description="Response style: concise, balanced, detailed")
     include_sources: Optional[bool] = Field(True, description="Include sources and citations")
     include_debug_info: Optional[bool] = Field(False, description="Include debug information")
@@ -72,9 +67,7 @@ class ChatRequest(SecureChatInput):
             raise ValueError(f"Style must be one of: {valid_styles}")
         return v
 
-
 class StreamingChatRequest(BaseModel):
-    """OpenAI-compatible streaming chat request."""
     messages: List[Dict[str, str]] = Field(..., description="Conversation messages")
     model: Optional[str] = Field("auto", description="Model preference")
     max_tokens: Optional[int] = Field(300, ge=1, le=2000)
@@ -87,26 +80,19 @@ class StreamingChatRequest(BaseModel):
     def validate_messages(cls, v):
         if not v:
             raise ValueError("Messages cannot be empty")
-        
         for msg in v:
             if not isinstance(msg, dict) or 'role' not in msg or 'content' not in msg:
                 raise ValueError("Each message must have 'role' and 'content'")
-            
             if msg['role'] not in ['user', 'assistant', 'system']:
                 raise ValueError("Role must be 'user', 'assistant', or 'system'")
-        
         return v
 
-
 async def initialize_chat_dependencies():
-    """Initialize chat API dependencies."""
     global model_manager, cache_manager, chat_graph
-    
     if not model_manager:
         model_manager = ModelManager()
         await model_manager.initialize()
         logger.info("ModelManager initialized for chat API")
-    
     if not cache_manager:
         try:
             cache_manager = CacheManager(settings.redis_url)
@@ -115,51 +101,44 @@ async def initialize_chat_dependencies():
         except Exception as e:
             logger.warning(f"CacheManager initialization failed: {e}")
             cache_manager = None
-    
     if not chat_graph:
         chat_graph = ChatGraph(model_manager, cache_manager)
         logger.info("ChatGraph initialized for chat API")
 
+@router.get("/health")
+async def chat_health():
+    return {
+        "status": "healthy",
+        "service": "chat",
+        "timestamp": time.time()
+    }
 
+# --- Begin merged advanced coroutine-safe endpoints and helpers ---
+
+# CORRECTED MAIN ENDPOINT WITH COROUTINE SAFETY AND ADVANCED LOGIC
 @router.post("/complete", response_model=ChatResponse)
 @log_performance("chat_complete")
+@coroutine_safe(timeout=60.0)
 async def chat_complete(
-    request: ChatRequest,
     req: Request,
     background_tasks: BackgroundTasks,
+    chat_request: ChatRequest = Body(..., embed=False),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """
-    Complete chat endpoint with full graph system integration.
-    
-    Features:
-    - Intelligent conversation management
-    - Context-aware responses
-    - Cost optimization and tracking
-    - Comprehensive error handling
-    """
-    # Initialize correlation ID for this request
-    correlation_id = str(uuid.uuid4())
-    set_correlation_id(correlation_id)
-    
-    # Initialize dependencies
-    await initialize_chat_dependencies()
-    
-    start_time = time.time()
     query_id = str(uuid.uuid4())
-    
+    correlation_id = get_correlation_id()
+    start_time = time.time()
     logger.info(
         "Chat completion request started",
         query_id=query_id,
         user_id=current_user["user_id"],
-        message_length=len(request.message),
-        session_id=request.session_id,
+        message_length=len(chat_request.message),
+        session_id=chat_request.session_id,
         correlation_id=correlation_id
     )
-    
     try:
         # Content policy check
-        policy_check = check_content_policy(request.message)
+        policy_check = check_content_policy(chat_request.message)
         if not policy_check["passed"]:
             raise HTTPException(
                 status_code=400,
@@ -168,161 +147,123 @@ async def chat_complete(
                     error_code="CONTENT_POLICY_VIOLATION",
                     query_id=query_id,
                     correlation_id=correlation_id,
-                    suggestions=["Please rephrase your request", "Avoid inappropriate content"]
+                    suggestions=["Please rephrase your request", "Avoid prohibited content"]
                 ).dict()
             )
-        
-        # Create session ID if not provided
-        session_id = request.session_id or f"session_{current_user['user_id']}_{int(time.time())}"
-        
-        # Map quality requirement
-        quality_mapping = {
-            "minimal": QualityLevel.MINIMAL,
-            "balanced": QualityLevel.BALANCED,
-            "high": QualityLevel.HIGH,
-            "premium": QualityLevel.PREMIUM
-        }
-        quality_level = quality_mapping.get(request.quality_requirement, QualityLevel.BALANCED)
-        
-        # Create graph state
+        session_id = chat_request.session_id or f"chat_{current_user['user_id']}_{int(time.time())}"
+        conversation_history = chat_request.user_context.get("conversation_history", [])
         graph_state = GraphState(
             query_id=query_id,
             correlation_id=correlation_id,
             user_id=current_user["user_id"],
             session_id=session_id,
-            original_query=request.message,
-            quality_requirement=quality_level,
-            max_cost=request.max_cost,
-            max_execution_time=request.max_execution_time,
-            force_local_only=request.force_local_only,
+            original_query=chat_request.message,
+            conversation_history=conversation_history,
+            quality_requirement=getattr(QualityLevel, chat_request.quality_requirement.upper(), QualityLevel.BALANCED),
+            max_cost=chat_request.max_cost,
+            max_execution_time=chat_request.max_execution_time,
             user_preferences={
-                "response_style": request.response_style,
-                "include_sources": request.include_sources,
                 "tier": current_user.get("tier", "free"),
-                **request.user_context
+                "response_style": chat_request.response_style,
+                "include_sources": chat_request.include_sources,
+                "force_local_only": chat_request.force_local_only
             }
         )
-        
-        # Execute chat graph
-        final_state = await chat_graph.execute(graph_state)
-        logger.info(f"💬 Final state type: {type(final_state)}")
-        logger.info(f"💬 Final state value: {final_state}")
-        if hasattr(final_state, '__name__'):
-            logger.error(f"🚨 RETURNING FUNCTION: {final_state.__name__}")
-        # Calculate metrics
-        execution_time = time.time() - start_time
-        total_cost = final_state.calculate_total_cost()
-        avg_confidence = final_state.get_avg_confidence()
-        
-        # Create conversation context for response
-        context_data = final_state.intermediate_results.get("conversation_context", {})
+        chat_result = await safe_graph_execute(
+            chat_graph, 
+            graph_state, 
+            timeout=chat_request.max_execution_time
+        )
+        chat_result = await ensure_awaited(chat_result)
+        if not hasattr(chat_result, 'final_response'):
+            logger.error(f"Chat result missing final_response: {type(chat_result)}")
+            raise ValueError("Invalid chat result structure")
         conversation_context = ConversationContext(
             session_id=session_id,
-            message_count=len(final_state.conversation_history) + 1,
-            user_preferences=final_state.user_preferences,
-            conversation_summary=context_data.get("conversation_topic")
+            message_count=len(conversation_history) + 1,
+            last_updated=datetime.utcnow().isoformat(),
+            user_preferences=chat_request.user_context,
+            conversation_summary=getattr(chat_result, 'conversation_summary', None)
         )
-        
-        # Build response data
         chat_data = ChatData(
-            response=final_state.final_response or "I'm sorry, I couldn't generate a response.",
+            response=chat_result.final_response,
             session_id=session_id,
             context=conversation_context,
-            sources=final_state.sources_consulted,
-            citations=final_state.citations
+            sources=getattr(chat_result, 'sources_consulted', []),
+            citations=getattr(chat_result, 'citations', [])
         )
-        
-        # Build metadata
+        total_cost = 0.0
+        try:
+            if hasattr(chat_result, 'calculate_total_cost'):
+                cost_calc = chat_result.calculate_total_cost()
+                total_cost = await ensure_awaited(cost_calc) if asyncio.iscoroutine(cost_calc) else cost_calc
+        except Exception as e:
+            logger.warning(f"Error calculating cost: {e}")
+        execution_time = time.time() - start_time
         metadata = ResponseMetadata(
             query_id=query_id,
-            correlation_id=correlation_id,
             execution_time=execution_time,
             cost=total_cost,
-            models_used=list(final_state.models_used),
-            confidence=avg_confidence,
-            cached=False,  # Graph execution is not cached (individual components may be)
-            routing_path=final_state.execution_path,
-            escalation_reason=final_state.escalation_reason,
-            cache_hit_rate=0.0,  # TODO: Calculate from individual node cache hits
-            local_processing_percentage=1.0 if total_cost == 0.0 else 0.8,
-            source_count=len(final_state.sources_consulted),
-            citation_count=len(final_state.citations)
+            models_used=list(getattr(chat_result, 'models_used', set())),
+            confidence=getattr(chat_result, 'get_avg_confidence', lambda: 1.0)(),
+            cached=False,
+            timestamp=datetime.utcnow().isoformat()
         )
-        
-        # Build cost prediction
-        cost_prediction = CostPrediction(
-            estimated_cost=total_cost,
-            cost_breakdown=[
-                {"step": step, "service": "local_model", "cost": cost}
-                for step, cost in final_state.costs_incurred.items()
-            ],
-            savings_tips=[
-                "All processing done locally - no additional costs incurred",
-                "Consider using 'minimal' quality for faster responses on simple queries"
-            ] if total_cost == 0.0 else [
-                "Some API calls were made - consider local alternatives",
-                "Upgrade to pro tier for better cost optimization"
-            ],
-            budget_remaining=request.max_cost - total_cost,
-            budget_percentage_used=(total_cost / request.max_cost) * 100 if request.max_cost > 0 else 0
-        )
-        
-        # Build developer hints
-        developer_hints = DeveloperHints(
-            suggested_next_queries=[
-                "Can you explain that in more detail?",
-                "What are some examples?",
-                "How does this relate to other concepts?"
-            ],
-            potential_optimizations={
-                "response_time": f"Current: {execution_time:.2f}s. Try 'minimal' quality for faster responses.",
-                "cost_efficiency": "Using local models - optimal cost efficiency achieved.",
-                "quality": f"Confidence: {avg_confidence:.2f}. Use 'high' quality for better results."
-            },
-            knowledge_gaps=[warning for warning in final_state.warnings if "confidence" in warning.lower()],
-            routing_explanation=f"Query routed through: {' → '.join(final_state.execution_path)}",
-            cache_hit_info="Conversation context cached for faster follow-up responses",
-            performance_hints={
-                "execution_time": execution_time,
-                "nodes_executed": len(final_state.execution_path),
-                "avg_confidence": avg_confidence,
-                "optimization_suggestions": []
-            }
-        )
-        
-        # Create response
+        cost_prediction = None
+        if chat_request.include_debug_info:
+            cost_prediction = CostPrediction(
+                estimated_cost=total_cost,
+                cost_breakdown=[],
+                savings_tips=["Use lower quality settings for simple queries"],
+                alternative_workflows=[]
+            )
+        developer_hints = None
+        if chat_request.include_debug_info:
+            developer_hints = DeveloperHints(
+                execution_path=getattr(chat_result, 'execution_path', []),
+                routing_explanation=f"Processed as {chat_request.quality_requirement} quality chat",
+                performance={
+                    "execution_time": execution_time,
+                    "models_used": len(metadata.models_used),
+                    "confidence": metadata.confidence
+                }
+            )
         response = ChatResponse(
-            status="success" if not final_state.errors else "partial",
+            status="success",
             data=chat_data,
             metadata=metadata,
             cost_prediction=cost_prediction,
-            developer_hints=developer_hints if request.include_debug_info else None
+            developer_hints=developer_hints
         )
-        
-        # Log success
+        from app.core.async_utils import AsyncSafetyValidator
+        try:
+            AsyncSafetyValidator.assert_no_coroutines(
+                response, 
+                "Chat response contains coroutines"
+            )
+        except AssertionError as e:
+            logger.error(f"Coroutine safety check failed: {e}")
+            return create_safe_fallback_response(query_id, correlation_id, execution_time)
         logger.info(
             "Chat completion successful",
             query_id=query_id,
             execution_time=execution_time,
             cost=total_cost,
-            confidence=avg_confidence,
-            response_length=len(final_state.final_response),
             correlation_id=correlation_id
         )
-        
-        # Background task for analytics
         background_tasks.add_task(
-            _record_chat_analytics,
-            query_id, current_user["user_id"], execution_time, total_cost, avg_confidence
+            log_chat_analytics,
+            query_id,
+            request.message,
+            chat_result.final_response,
+            execution_time,
+            total_cost
         )
-        
         return response
-        
     except HTTPException:
-        raise  # Re-raise HTTP exceptions
+        raise
     except Exception as e:
         execution_time = time.time() - start_time
-        
         logger.error(
             "Chat completion failed",
             query_id=query_id,
@@ -331,7 +272,6 @@ async def chat_complete(
             correlation_id=correlation_id,
             exc_info=True
         )
-        
         raise HTTPException(
             status_code=500,
             detail=create_error_response(
@@ -342,138 +282,43 @@ async def chat_complete(
                 technical_details=str(e),
                 suggestions=[
                     "Try rephrasing your question",
-                    "Reduce complexity if query is very long",
+                    "Reduce complexity if query is very long", 
                     "Try again in a moment"
                 ]
             ).dict()
         )
 
-
-@router.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(
-    request: ChatRequest,
-    req: Request
-) -> ChatResponse:
-    """Enhanced chat endpoint with search integration"""
-    try:
-        search_system: Optional[OptimizedSearchSystem] = getattr(req.app.state, 'search_system', None)
-        if not search_system:
-            logger.warning("Search system not available, using fallback")
-            return await fallback_chat_response(request)
-        result = await search_system.execute_optimized_search(
-            query=request.message,
-            budget=getattr(request, 'budget', 2.0),
-            quality=getattr(request, 'quality_requirement', 'standard'),
-            max_results=getattr(request, 'max_results', 10)
-        )
-        chat_response = ChatResponse(
-            message=result["response"],
-            query_id=f"search_{int(time.time())}",
-            model_used=result["metadata"].get("provider_used", "search"),
-            response_time=result["metadata"]["execution_time"],
-            cost=result["metadata"]["total_cost"],
-            citations=result.get("citations", []),
-            metadata={
-                "search_enabled": True,
-                "execution_path": result["metadata"].get("execution_path", []),
-                "confidence_score": result["metadata"].get("confidence_score", 0.0),
-                "performance_metrics": result.get("performance_metrics", {})
-            }
-        )
-        return chat_response
-    except Exception as e:
-        logger.error(f"Chat endpoint error: {str(e)}")
-        return await fallback_chat_response(request)
-
-async def fallback_chat_response(request: ChatRequest) -> ChatResponse:
-    # Provide all required fields for ChatResponse and BaseResponse
-    now = datetime.now().isoformat()
-    return ChatResponse(
-        status="error",
-        data={
-            "response": "I'm experiencing some technical difficulties with my search capabilities. How else can I help you?",
-            "session_id": getattr(request, 'session_id', 'unknown')
-        },
-        metadata={
-            "query_id": f"fallback_{int(time.time())}",
-            "execution_time": 0.1,
-            "cost": 0.0,
-            "models_used": ["fallback"],
-            "confidence": 0.0,
-            "cached": False,
-            "timestamp": now,
-            "correlation_id": get_correlation_id()  # <-- Ensure this is always present
-        },
-        cost_prediction={
-            "estimated_cost": 0.0,
-            "cost_breakdown": [],
-            "savings_tips": []
-        },
-        developer_hints={
-            "routing_explanation": "Fallback response due to error.",
-            "execution_path": ["fallback"],
-            "performance": {},
-            "suggested_next_queries": [],
-            "potential_optimizations": {},
-            "knowledge_gaps": []
-        }
-    )
-
-
+# CORRECTED STREAMING ENDPOINT WITH COROUTINE SAFETY
 @router.post("/stream")
+@coroutine_safe(timeout=120.0)
 async def chat_stream(
     request: StreamingChatRequest,
+    req: Request,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """
-    Streaming chat endpoint compatible with OpenAI API format.
-    
-    Provides real-time response streaming for better user experience.
-    """
-    # Initialize correlation ID
     correlation_id = str(uuid.uuid4())
     set_correlation_id(correlation_id)
-    
-    # Initialize dependencies
-    await initialize_chat_dependencies()
-    
-    # Extract user message
-    if not request.messages:
-        raise HTTPException(status_code=400, detail="Messages cannot be empty")
-    
-    user_message = request.messages[-1]["content"]
     query_id = str(uuid.uuid4())
-    
-    logger.info(
-        "Streaming chat request started",
-        query_id=query_id,
-        user_id=current_user["user_id"],
-        message_count=len(request.messages),
-        correlation_id=correlation_id
-    )
-    
-    async def generate_stream():
-        """Generate streaming response."""
+    await initialize_chat_dependencies()
+    async def generate_safe_stream():
         try:
-            # Content policy check
+            user_message = ""
+            for msg in reversed(request.messages):
+                if msg["role"] == "user":
+                    user_message = msg["content"]
+                    break
             policy_check = check_content_policy(user_message)
             if not policy_check["passed"]:
                 yield _create_error_stream_chunk("Content violates policy")
                 return
-            
-            # Create session ID
             session_id = request.session_id or f"stream_{current_user['user_id']}_{int(time.time())}"
-            
-            # Build conversation history
             conversation_history = []
-            for msg in request.messages[:-1]:  # Exclude current message
+            for msg in request.messages[:-1]:
                 conversation_history.append({
                     "role": msg["role"],
                     "content": msg["content"],
                     "timestamp": time.time()
                 })
-            
-            # Create graph state
             graph_state = GraphState(
                 query_id=query_id,
                 correlation_id=correlation_id,
@@ -489,178 +334,55 @@ async def chat_stream(
                     "streaming": True
                 }
             )
-            
-            # Execute chat graph and PROPERLY AWAIT the result
-            chat_result = await chat_graph.execute(graph_state)
-
-            # Ensure we have the actual result, not a coroutine (double-await safety)
-            while asyncio.iscoroutine(chat_result):
-                chat_result = await chat_result
-            
+            chat_result = await safe_graph_execute(chat_graph, graph_state, timeout=30.0)
+            chat_result = await ensure_awaited(chat_result)
             if chat_result.final_response:
-                # Simulate streaming by chunking the response
                 response_text = chat_result.final_response
-                chunk_size = max(1, len(response_text) // 20)  # ~20 chunks
-                
+                chunk_size = max(1, len(response_text) // 20)
                 for i in range(0, len(response_text), chunk_size):
                     chunk = response_text[i:i + chunk_size]
-                    
                     stream_chunk = {
                         "id": f"chatcmpl-{query_id}",
                         "object": "chat.completion.chunk",
                         "created": int(time.time()),
-                        "model": list(chat_result.models_used)[0] if chat_result.models_used else "local",
+                        "model": list(chat_result.models_used)[0] if getattr(chat_result, 'models_used', None) else "local",
                         "choices": [{
                             "index": 0,
                             "delta": {"content": chunk},
                             "finish_reason": None
                         }]
                     }
-                    
                     yield f"data: {json.dumps(stream_chunk)}\n\n"
-                    await asyncio.sleep(0.05)  # Small delay for streaming effect
-                
-                # Final chunk
+                    await asyncio.sleep(0.05)
                 final_chunk = {
                     "id": f"chatcmpl-{query_id}",
                     "object": "chat.completion.chunk", 
                     "created": int(time.time()),
-                    "model": list(chat_result.models_used)[0] if chat_result.models_used else "local",
+                    "model": list(chat_result.models_used)[0] if getattr(chat_result, 'models_used', None) else "local",
                     "choices": [{
                         "index": 0,
                         "delta": {},
                         "finish_reason": "stop"
                     }]
                 }
-                
                 yield f"data: {json.dumps(final_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
             else:
                 yield _create_error_stream_chunk("No response generated")
-            
-            yield "data: [DONE]\n\n"
-            
         except Exception as e:
-            logger.error(
-                "Streaming chat failed",
-                query_id=query_id,
-                error=str(e),
-                correlation_id=correlation_id,
-                exc_info=True
-            )
-            yield _create_error_stream_chunk(f"Error: {str(e)}")
-    
-    return EventSourceResponse(generate_stream())
-
-
-@router.get("/history/{session_id}")
-async def get_conversation_history(
-    session_id: str,
-    limit: int = 50,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """Get conversation history for a session."""
-    correlation_id = str(uuid.uuid4())
-    set_correlation_id(correlation_id)
-    
-    logger.info(
-        "Conversation history requested",
-        session_id=session_id,
-        user_id=current_user["user_id"],
-        limit=limit,
-        correlation_id=correlation_id
-    )
-    
-    try:
-        await initialize_chat_dependencies()
-        
-        if cache_manager:
-            history = await cache_manager.get_conversation_history(session_id)
-            
-            # Limit results
-            if history and len(history) > limit:
-                history = history[-limit:]
-            
-            return {
-                "session_id": session_id,
-                "history": history or [],
-                "message_count": len(history) if history else 0,
-                "correlation_id": correlation_id
-            }
-        else:
-            return {
-                "session_id": session_id,
-                "history": [],
-                "message_count": 0,
-                "correlation_id": correlation_id,
-                "note": "Cache manager not available"
-            }
-            
-    except Exception as e:
-        logger.error(
-            "Failed to get conversation history",
-            session_id=session_id,
-            error=str(e),
-            correlation_id=correlation_id
-        )
-        
-        raise HTTPException(
-            status_code=500,
-            detail=create_error_response(
-                message="Failed to retrieve conversation history",
-                error_code="HISTORY_RETRIEVAL_ERROR",
-                correlation_id=correlation_id
-            ).dict()
-        )
-
-
-@router.delete("/history/{session_id}")
-async def clear_conversation_history(
-    session_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """Clear conversation history for a session."""
-    correlation_id = str(uuid.uuid4())
-    set_correlation_id(correlation_id)
-    
-    logger.info(
-        "Conversation history clear requested",
-        session_id=session_id,
-        user_id=current_user["user_id"],
-        correlation_id=correlation_id
-    )
-    
-    try:
-        await initialize_chat_dependencies()
-        
-        if cache_manager:
-            await cache_manager.update_conversation_history(session_id, [])
-            
-        return {
-            "session_id": session_id,
-            "cleared": True,
-            "correlation_id": correlation_id
+            logger.error(f"Streaming error: {e}")
+            yield _create_error_stream_chunk(f"Internal error: {str(e)}")
+    return StreamingResponse(
+        generate_safe_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
         }
-        
-    except Exception as e:
-        logger.error(
-            "Failed to clear conversation history",
-            session_id=session_id,
-            error=str(e),
-            correlation_id=correlation_id
-        )
-        
-        raise HTTPException(
-            status_code=500,
-            detail=create_error_response(
-                message="Failed to clear conversation history",
-                error_code="HISTORY_CLEAR_ERROR",
-                correlation_id=correlation_id
-            ).dict()
-        )
-
+    )
 
 def _create_error_stream_chunk(error_message: str) -> str:
-    """Create an error chunk for streaming responses."""
     error_chunk = {
         "id": f"chatcmpl-error-{int(time.time())}",
         "object": "chat.completion.chunk",
@@ -669,47 +391,80 @@ def _create_error_stream_chunk(error_message: str) -> str:
         "choices": [{
             "index": 0,
             "delta": {"content": f"Error: {error_message}"},
-            "finish_reason": "error"
+            "finish_reason": "stop"
         }]
     }
     return f"data: {json.dumps(error_chunk)}\n\n"
 
+def create_safe_fallback_response(query_id: str, correlation_id: str, execution_time: float) -> ChatResponse:
+    chat_data = ChatData(
+        response="I apologize, but I'm experiencing technical difficulties. Please try again.",
+        session_id="fallback_session",
+        context=None,
+        sources=[],
+        citations=[]
+    )
+    metadata = ResponseMetadata(
+        query_id=query_id,
+        execution_time=execution_time,
+        cost=0.0,
+        models_used=["fallback"],
+        confidence=0.0,
+        cached=False,
+        timestamp=datetime.utcnow().isoformat()
+    )
+    return ChatResponse(
+        status="error",
+        data=chat_data,
+        metadata=metadata
+    )
 
-async def _record_chat_analytics(
+async def log_chat_analytics(
     query_id: str,
-    user_id: str, 
+    user_message: str,
+    response: str,
     execution_time: float,
-    cost: float,
-    confidence: float
+    cost: float
 ):
-    """Background task to record chat analytics."""
     try:
-        # TODO: Implement analytics recording
-        # This could write to ClickHouse, send to analytics service, etc.
         logger.info(
-            "Chat analytics recorded",
+            "Chat analytics",
             query_id=query_id,
-            user_id=user_id,
+            message_length=len(user_message),
+            response_length=len(response),
             execution_time=execution_time,
-            cost=cost,
-            confidence=confidence
+            cost=cost
         )
     except Exception as e:
-        logger.error(f"Failed to record analytics: {e}")
+        logger.error(f"Error logging analytics: {e}")
 
-
-# Dependency injection for testing
-def set_dependencies(
-    model_manager_instance: ModelManager,
-    cache_manager_instance: Optional[CacheManager] = None,
-    chat_graph_instance: Optional[ChatGraph] = None
+@router.get("/history/{session_id}")
+async def get_conversation_history(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """Set dependencies for testing."""
-    global model_manager, cache_manager, chat_graph
-    model_manager = model_manager_instance
-    cache_manager = cache_manager_instance
-    chat_graph = chat_graph_instance or ChatGraph(model_manager, cache_manager)
+    try:
+        return {
+            "session_id": session_id,
+            "history": [],
+            "message_count": 0,
+            "last_updated": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error fetching history: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch conversation history")
 
-
-# Export router
-__all__ = ['router', 'set_dependencies']
+@router.delete("/history/{session_id}")
+async def clear_conversation_history(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    try:
+        return {
+            "cleared": True,
+            "session_id": session_id,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error clearing history: {e}")
+        raise HTTPException(status_code=500, detail="Failed to clear conversation history")

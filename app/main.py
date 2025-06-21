@@ -141,8 +141,8 @@ async def lifespan(app: FastAPI):
             logger.warning("⚠️  ScrapingBee API key not found - content enhancement disabled")
         
         # Set dependencies for API modules
-        chat.set_dependencies(model_manager, app_state["cache_manager"], chat_graph)
-        search.set_dependencies(model_manager, app_state["cache_manager"], search_graph)
+        # chat.set_dependencies(model_manager, app_state["cache_manager"], chat_graph)
+        # search.set_dependencies(model_manager, app_state["cache_manager"], search_graph)
         logger.info("✅ API dependencies configured")
         
         # Application startup complete

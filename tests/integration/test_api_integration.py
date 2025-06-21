@@ -130,14 +130,14 @@ def mock_app_components():
         asyncio.run(verify_mocks())
 
     # Set FastAPI endpoint dependencies to use test mocks
-    from app.api.chat import set_dependencies as set_chat_dependencies
-    set_chat_dependencies(mock_model_manager, mock_cache_manager, mock_chat_graph)
+    # from app.api.chat import set_dependencies as set_chat_dependencies
+    # set_chat_dependencies(mock_model_manager, mock_cache_manager, mock_chat_graph)
     # If search.set_dependencies exists, do the same for search
-    try:
-        from app.api.search import set_dependencies as set_search_dependencies
-        set_search_dependencies(mock_model_manager, mock_cache_manager, mock_search_graph)
-    except ImportError:
-        pass
+    # try:
+    #     from app.api.search import set_dependencies as set_search_dependencies
+    #     set_search_dependencies(mock_model_manager, mock_cache_manager, mock_search_graph)
+    # except ImportError:
+    #     pass
 
     # Update app_state
     app_state.update({
@@ -183,7 +183,7 @@ async def test_search_basic():
         "quality": "standard"
     }
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/api/v1/search/basic", json={"request": payload})
+        resp = await client.post("/api/v1/search/basic", json=payload)
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "success"
@@ -207,7 +207,7 @@ async def test_chat_complete():
         "include_debug_info": False
     }
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/api/v1/chat/complete", json={"request": payload})
+        resp = await client.post("/api/v1/chat/complete", json=payload)
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] in ["success", "error"]

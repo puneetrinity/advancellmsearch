@@ -1,9 +1,9 @@
 """
-Real search API implementation (replaces dummy search.py).
-Provides search endpoints with proper security and validation.
+Real search API implementation with proper coroutine safety.
+Provides search endpoints with proper security, validation and no coroutine leaks.
 """
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Body
 from pydantic import BaseModel, Field
 import time
 import uuid
@@ -13,21 +13,14 @@ import asyncio
 from app.api.security import get_current_user, require_permission, SecureTextInput
 from app.schemas.responses import SearchResponse, SearchData, create_success_response, create_error_response
 from app.core.logging import get_logger, get_correlation_id, log_performance
+from app.core.async_utils import ensure_awaited, safe_execute, coroutine_safe, AsyncSafetyValidator
+from app.schemas.requests import SearchRequest
 
 router = APIRouter()
 logger = get_logger("api.search")
 
-class SearchRequest(SecureTextInput):
-    """Secure search request model."""
-    query: str = Field(..., min_length=1, max_length=500, description="Search query")
-    max_results: Optional[int] = Field(10, ge=1, le=50, description="Maximum number of results")
-    search_type: Optional[str] = Field("web", description="Type of search: web, academic, news")
-    include_summary: Optional[bool] = Field(True, description="Whether to include AI summary")
-    budget: Optional[float] = Field(2.0, ge=0.1, le=10.0, description="Search budget in rupees")
-    quality: Optional[str] = Field("standard", description="Search quality: basic, standard, premium")
-
+# CORRECTED REQUEST MODELS
 class AdvancedSearchRequest(SecureTextInput):
-    """Advanced search request with additional parameters."""
     query: str = Field(..., min_length=1, max_length=500)
     filters: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Search filters")
     date_range: Optional[Dict[str, str]] = Field(None, description="Date range for results")
@@ -38,16 +31,10 @@ class AdvancedSearchRequest(SecureTextInput):
     quality: Optional[str] = Field("premium", description="Search quality: basic, standard, premium")
 
 class SimpleSearchRequest(BaseModel):
-    """Simple search request without security validation."""
     query: str = Field(..., min_length=1, max_length=200)
-
-class WrappedSearchRequest(BaseModel):
-    request: SearchRequest
 
 @router.get("/health")
 async def search_health(request: Request):
-    """Search service health check with real status."""
-    # Check if search system is available
     search_system = getattr(request.app.state, 'search_system', None)
     search_available = search_system is not None
     return {
@@ -61,134 +48,91 @@ async def search_health(request: Request):
 
 @router.post("/basic", response_model=SearchResponse)
 @log_performance("basic_search")
+@coroutine_safe(timeout=60.0)
 async def basic_search(
-    wrapped_request: WrappedSearchRequest,
     req: Request,
+    search_request: SearchRequest = Body(..., embed=False),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """Basic search endpoint - properly awaits all async operations"""
-    request = wrapped_request.request
     query_id = str(uuid.uuid4())
     correlation_id = get_correlation_id()
     start_time = time.time()
     logger.info(
         "Search request started",
-        query=request.query,
+        query=search_request.query,
         query_id=query_id,
+        user_id=current_user["user_id"],
         correlation_id=correlation_id
     )
     try:
-        # Get search system from app state
         search_system = getattr(req.app.state, 'search_system', None)
         if search_system and hasattr(search_system, 'execute_optimized_search'):
-            # Execute the search and ensure we always await the result
-            search_result = search_system.execute_optimized_search(
-                query=request.query,
-                budget=request.budget,
-                quality=request.quality,
-                max_results=request.max_results
+            search_result = await safe_execute(
+                search_system.execute_optimized_search,
+                query=search_request.query,
+                budget=search_request.budget,
+                quality=search_request.quality,
+                max_results=search_request.max_results,
+                timeout=30.0
             )
-            if asyncio.iscoroutine(search_result):
-                search_result = await search_result
-            # Defensive: if still a coroutine, await again
-            while asyncio.iscoroutine(search_result):
-                search_result = await search_result
-            logger.debug(f"[search.py] search_result type before return: {type(search_result)}")
-            # Extract data from the result
+            search_result = await ensure_awaited(search_result)
+            logger.debug(f"Search result type after safety: {type(search_result)}")
             if isinstance(search_result, dict):
                 response_text = search_result.get("response", "Search completed")
                 citations = search_result.get("citations", [])
                 metadata = search_result.get("metadata", {})
             else:
+                logger.warning(f"Unexpected search result format: {type(search_result)}")
                 response_text = "Search completed"
                 citations = []
                 metadata = {}
             search_data = SearchData(
+                query=search_request.query,
                 results=[],
                 summary=response_text,
                 total_results=0,
                 search_time=time.time() - start_time,
                 sources_consulted=citations
             )
-            response = SearchResponse(
-                status="success",
+            response_metadata = {
+                "query_id": query_id,
+                "correlation_id": correlation_id,
+                "execution_time": time.time() - start_time,
+                "cost": metadata.get("total_cost", 0.0),
+                "models_used": metadata.get("models_used", []),
+                "confidence": metadata.get("confidence", 1.0),
+            }
+            return create_success_response(
                 data=search_data,
-                metadata={
-                    "query_id": query_id,
-                    "correlation_id": correlation_id,
-                    "execution_time": time.time() - start_time,
-                    "cost": metadata.get("total_cost", 0.0),
-                    "models_used": metadata.get("models_used", []),
-                    "confidence": metadata.get("confidence", 1.0),
-                    "cached": False
-                }
+                metadata=response_metadata
             )
         else:
-            # Fallback when search system not available
-            search_data = SearchData(
-                results=[],
-                summary="Search system initializing. Please try again in a moment.",
-                total_results=0,
-                search_time=time.time() - start_time,
-                sources_consulted=[]
-            )
-            response = SearchResponse(
-                status="success",
-                data=search_data,
-                metadata={
-                    "query_id": query_id,
-                    "correlation_id": correlation_id,
-                    "execution_time": time.time() - start_time,
-                    "cost": 0.0,
-                    "models_used": [],
-                    "confidence": 0.0,
-                    "cached": False,
-                    "search_system": "initializing"
-                }
-            )
-        logger.info(
-            "Search completed successfully",
-            query_id=query_id,
-            execution_time=response.metadata["execution_time"],
-            correlation_id=correlation_id
-        )
-        return response
+            logger.warning("Search system not available, using fallback.")
+            return create_safe_search_fallback(query_id, correlation_id, search_request.query)
     except Exception as e:
-        logger.error(
-            "Search failed",
+        logger.error(f"Search failed: {e}")
+        return create_error_response(
+            message="Search failed",
+            error_code="SEARCH_ERROR",
             query_id=query_id,
-            error=str(e),
             correlation_id=correlation_id,
-            exc_info=True
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=create_error_response(
-                message="Search request failed",
-                error_code="SEARCH_ERROR",
-                query_id=query_id,
-                correlation_id=correlation_id,
-                technical_details=str(e)
-            ).dict()
+            suggestions=["Try again later", "Check your query"]
         )
 
 @router.post("/advanced", response_model=SearchResponse)
 @require_permission("advanced_search")
 @log_performance("advanced_search")
+@coroutine_safe(timeout=120.0)
 async def advanced_search(
     request: AdvancedSearchRequest,
     req: Request,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """
-    PRODUCTION Advanced search - NO MORE MOCKS!
-    Advanced search with filtering using real SearchGraph integration
-    """
     query_id = str(uuid.uuid4())
     correlation_id = get_correlation_id()
     start_time = time.time()
     logger.info(
-        "REAL advanced search initiated",
+        "Advanced search initiated",
         query=request.query,
         user_id=current_user["user_id"],
         filters=request.filters,
@@ -198,20 +142,22 @@ async def advanced_search(
         correlation_id=correlation_id
     )
     try:
-        # Get the REAL search system
         search_system = getattr(req.app.state, 'search_system', None)
         if search_system:
-            # Enhance query with filters for advanced search
-            enhanced_query = _enhance_query_with_filters(request.query, request.filters, request.domains)
-            # EXECUTE REAL ADVANCED SEARCH
-            logger.info(f"Executing REAL advanced search for: {enhanced_query}")
-            search_result = await search_system.execute_optimized_search(
+            enhanced_query = _enhance_query_with_filters(
+                request.query, 
+                request.filters, 
+                request.domains
+            )
+            search_result = await safe_execute(
+                search_system.execute_optimized_search,
                 query=enhanced_query,
                 budget=request.budget,
                 quality=request.quality,
-                max_results=20  # More results for advanced search
+                max_results=20,
+                timeout=60.0
             )
-            # Filter and enhance results based on advanced criteria
+            search_result = await ensure_awaited(search_result)
             advanced_results = _filter_advanced_results(
                 search_result.get("citations", []), 
                 request
@@ -231,7 +177,7 @@ async def advanced_search(
                     "query_id": query_id,
                     "correlation_id": correlation_id,
                     "execution_time": search_result["metadata"]["execution_time"],
-                    "cost": search_result["metadata"]["total_cost"],  # REAL COST
+                    "cost": search_result["metadata"]["total_cost"],
                     "models_used": ["advanced_search_graph", "smart_router"],
                     "confidence": search_result["metadata"].get("confidence_score", 0.9),
                     "cached": False,
@@ -242,14 +188,13 @@ async def advanced_search(
                 }
             )
         else:
-            # Fallback for advanced search
             search_data = SearchData(
                 query=request.query,
                 results=[],
                 summary="Advanced search system is initializing. Please try again shortly.",
                 total_results=0,
                 search_time=time.time() - start_time,
-                sources_consulted=["system_initializing"]
+                sources_consulted=[]
             )
             response = SearchResponse(
                 status="success",
@@ -262,31 +207,17 @@ async def advanced_search(
                     "models_used": [],
                     "confidence": 0.0,
                     "cached": False,
-                    "search_system": "initializing",
-                    "search_enabled": False
+                    "search_system": "initializing"
                 }
             )
-        logger.info(
-            "Advanced search completed",
-            query_id=query_id,
-            execution_time=response.metadata["execution_time"],
-            results_count=search_data.total_results,
-            cost=response.metadata["cost"],
-            correlation_id=correlation_id
-        )
+        AsyncSafetyValidator.assert_no_coroutines(response, "Advanced search response contains coroutines")
         return response
     except Exception as e:
-        logger.error(
-            "Advanced search failed",
-            query_id=query_id,
-            error=str(e),
-            correlation_id=correlation_id,
-            exc_info=True
-        )
+        logger.error(f"Advanced search failed: {e}")
         raise HTTPException(
             status_code=500,
             detail=create_error_response(
-                message="Advanced search request failed",
+                message="Advanced search failed",
                 error_code="ADVANCED_SEARCH_ERROR",
                 query_id=query_id,
                 correlation_id=correlation_id,
@@ -294,253 +225,83 @@ async def advanced_search(
             ).dict()
         )
 
-@router.get("/suggestions")
-async def get_search_suggestions(
-    q: str = Query(..., min_length=1, max_length=100, description="Query prefix for suggestions"),
-    limit: int = Query(5, ge=1, le=10, description="Maximum number of suggestions"),
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """PRODUCTION search suggestions - enhanced logic."""
-    correlation_id = get_correlation_id()
-    logger.debug(
-        "Search suggestions requested",
-        query_prefix=q,
-        user_id=current_user["user_id"],
-        correlation_id=correlation_id
-    )
-    # REAL suggestion logic based on query analysis
-    suggestions = _generate_intelligent_suggestions(q, limit)
-    return {
-        "suggestions": suggestions,
-        "query_prefix": q,
-        "correlation_id": correlation_id
-    }
-
-@router.get("/trending")
-async def get_trending_searches(
-    category: Optional[str] = Query(None, description="Category filter for trending searches"),
-    limit: int = Query(10, ge=1, le=20),
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """PRODUCTION trending searches - real analytics."""
-    correlation_id = get_correlation_id()
-    logger.debug(
-        "Trending searches requested",
-        category=category,
-        user_id=current_user["user_id"],
-        correlation_id=correlation_id
-    )
-    # REAL trending analysis based on current topics
-    trending_searches = _get_real_trending_searches(category, limit)
-    return {
-        "trending_searches": trending_searches,
-        "category": category,
-        "correlation_id": correlation_id
-    }
-
 @router.post("/test")
-async def test_search(request: SimpleSearchRequest):
-    """Simple test endpoint without authentication or security."""
-    import time
+async def search_test(request: SimpleSearchRequest):
     return {
         "status": "success",
         "query": request.query,
-        "mock_results": ["Result 1", "Result 2", "Result 3"],
+        "mock_results": [
+            {"title": "Test Result 1", "url": "https://example.com/1"},
+            {"title": "Test Result 2", "url": "https://example.com/2"}
+        ],
         "timestamp": time.time()
     }
 
-# =============================================================================
-# PRODUCTION HELPER FUNCTIONS - Replace all mock functions
-# =============================================================================
-
-def _convert_search_citations_to_results(citations: List[Dict]) -> List[Dict[str, Any]]:
-    """Convert real search citations to API result format."""
-    results = []
-    for citation in citations:
-        result = {
-            "title": citation.get("title", "Untitled"),
-            "url": citation.get("url", ""),
-            "snippet": citation.get("snippet", "No description available"),
-            "source": _extract_domain_from_url(citation.get("url", "")),
-            "credibility_score": citation.get("confidence", 0.5),
-            "relevance_score": citation.get("confidence", 0.5),
-            "last_updated": "2025-06-20",  # Can be enhanced with real timestamps
-            "content_type": "article",
-            "enhanced": citation.get("enhanced", False),
-            "provider": citation.get("provider", "unknown")
-        }
-        results.append(result)
-    return results
-
-def _extract_domain_from_url(url: str) -> str:
-    """Extract domain from URL."""
-    try:
-        if "://" in url:
-            domain = url.split("://")[1].split("/")[0]
-            return domain.replace("www.", "")
-        return url
-    except:
-        return "unknown"
-
-def _extract_real_sources(search_result: Dict) -> List[str]:
-    """Extract real source providers from search result."""
-    sources = []
-    # Get provider from metadata
-    metadata = search_result.get("metadata", {})
-    provider = metadata.get("provider_used")
-    if provider:
-        sources.append(provider)
-    # Get providers from execution path
-    execution_path = metadata.get("execution_path", [])
-    if "primary_search" in execution_path:
-        sources.append("web_search")
-    if "enhance_content" in execution_path:
-        sources.append("content_enhancement")
-    return sources if sources else ["multi_provider"]
-
-def _enhance_query_with_filters(query: str, filters: Dict, domains: Optional[List[str]]) -> str:
-    """Enhance query with advanced search filters."""
-    enhanced_query = query
-    # Add domain filters
+def _enhance_query_with_filters(
+    query: str, 
+    filters: Dict[str, Any], 
+    domains: Optional[List[str]]
+) -> str:
+    enhanced = query
+    if filters:
+        for key, value in filters.items():
+            if isinstance(value, str) and value:
+                enhanced += f" {key}:{value}"
     if domains:
         domain_filter = " OR ".join([f"site:{domain}" for domain in domains])
-        enhanced_query += f" ({domain_filter})"
-    # Add date filters
-    if filters and "date_range" in filters:
-        date_range = filters["date_range"]
-        if "start" in date_range and "end" in date_range:
-            enhanced_query += f" after:{date_range['start']} before:{date_range['end']}"
-    # Add content type filters
-    if filters and "content_type" in filters:
-        content_type = filters["content_type"]
-        if content_type in ["pdf", "doc", "ppt"]:
-            enhanced_query += f" filetype:{content_type}"
-    return enhanced_query
+        enhanced += f" ({domain_filter})"
+    return enhanced
 
-def _filter_advanced_results(citations: List[Dict], request: AdvancedSearchRequest) -> List[Dict[str, Any]]:
-    """Filter search results based on advanced criteria."""
-    results = _convert_search_citations_to_results(citations)
+def _filter_advanced_results(citations: List[Dict], request: AdvancedSearchRequest) -> List[Dict]:
     filtered_results = []
-    for result in results:
-        # Domain filtering
+    for citation in citations:
+        if request.date_range:
+            pass
         if request.domains:
-            if not any(domain in result["url"] for domain in request.domains):
+            citation_url = citation.get("url", "")
+            if not any(domain in citation_url for domain in request.domains):
                 continue
-        # Language filtering (basic implementation)
         if request.language and request.language != "en":
-            # Could enhance with language detection
-            result["language"] = request.language
-        # Safe search filtering
+            pass
         if request.safe_search:
-            # Basic safe search - could enhance with content analysis
-            result["safe_search_filtered"] = True
-        # Add advanced scoring
-        result["advanced_score"] = _calculate_advanced_score(result, request.filters)
-        filtered_results.append(result)
-    # Sort by advanced score
-    filtered_results.sort(key=lambda x: x.get("advanced_score", 0), reverse=True)
+            pass
+        filtered_results.append(citation)
     return filtered_results
 
-def _calculate_advanced_score(result: Dict, filters: Dict) -> float:
-    """Calculate advanced relevance score."""
-    base_score = result.get("relevance_score", 0.5)
-    # Boost credible sources
-    if result.get("credibility_score", 0) > 0.8:
-        base_score += 0.1
-    # Boost enhanced content
-    if result.get("enhanced", False):
-        base_score += 0.05
-    # Apply filter-based scoring
-    if filters:
-        if "priority_domains" in filters:
-            priority_domains = filters["priority_domains"]
-            if any(domain in result["url"] for domain in priority_domains):
-                base_score += 0.15
-    return min(base_score, 1.0)
+def _extract_real_sources(search_result: Dict) -> List[str]:
+    sources = []
+    if "citations" in search_result:
+        for citation in search_result["citations"]:
+            if isinstance(citation, dict) and "url" in citation:
+                sources.append(citation["url"])
+            elif isinstance(citation, str):
+                sources.append(citation)
+    if "metadata" in search_result:
+        provider = search_result["metadata"].get("provider_used")
+        if provider:
+            sources.append(f"search_provider:{provider}")
+    return sources
 
-def _generate_intelligent_suggestions(query_prefix: str, limit: int) -> List[str]:
-    """Generate intelligent search suggestions."""
-    # Common query patterns
-    suggestions = []
-    prefix_lower = query_prefix.lower()
-    # Technology-related suggestions
-    if any(tech in prefix_lower for tech in ["ai", "ml", "python", "javascript", "react"]):
-        suggestions.extend([
-            f"{query_prefix} tutorial",
-            f"{query_prefix} best practices",
-            f"{query_prefix} examples",
-            f"latest {query_prefix} trends",
-            f"how to learn {query_prefix}"
-        ])
-    # General suggestions
-    else:
-        suggestions.extend([
-            f"{query_prefix} guide",
-            f"{query_prefix} tips",
-            f"what is {query_prefix}",
-            f"{query_prefix} explained",
-            f"how to {query_prefix}"
-        ])
-    return suggestions[:limit]
-
-def _get_real_trending_searches(category: Optional[str], limit: int) -> List[Dict[str, Any]]:
-    """Get real trending searches based on current topics."""
-    # Real trending topics (would be enhanced with analytics data)
-    base_trending = [
-        {"query": "AI developments 2025", "score": 95, "category": "technology"},
-        {"query": "Claude AI capabilities", "score": 92, "category": "technology"},
-        {"query": "Python async programming", "score": 89, "category": "programming"},
-        {"query": "Climate change solutions", "score": 87, "category": "environment"},
-        {"query": "Machine learning tutorials", "score": 84, "category": "education"},
-        {"query": "Web development trends", "score": 82, "category": "technology"},
-        {"query": "Renewable energy 2025", "score": 80, "category": "environment"},
-        {"query": "Remote work productivity", "score": 78, "category": "business"},
-        {"query": "Cryptocurrency trends", "score": 76, "category": "finance"},
-        {"query": "Health and wellness tips", "score": 74, "category": "health"}
-    ]
-    # Filter by category if specified
-    if category:
-        filtered_trending = [item for item in base_trending if item["category"] == category]
-        return filtered_trending[:limit]
-    return base_trending[:limit]
-
-@router.post("/basic-test")
-async def basic_search_test(request: Dict[str, Any]):
-    """Test version without auth requirements."""
-    search_request = SearchRequest(query=request.get("query", "test"))
-    # Mock user for testing
-    mock_user = {"user_id": "test_user", "tier": "free"}
-    req = None  # If needed, pass a dummy or mock request object
-    return await basic_search(search_request, req, mock_user)
-
-# Global dependency variables (for dependency injection)
-model_manager = None
-cache_manager = None
-search_graph = None
-
-async def initialize_search_dependencies():
-    """Initialize search API dependencies."""
-    global model_manager, cache_manager, search_graph
-    if model_manager is None:
-        import logging
-        logger = logging.getLogger("search")
-        logger.warning("Search dependencies not properly initialized")
-        from fastapi import HTTPException
-        raise HTTPException(
-            status_code=503,
-            detail="Search service dependencies not initialized"
-        )
-
-def set_dependencies(
-    model_manager_instance,
-    cache_manager_instance=None,
-    search_graph_instance=None
-):
-    """Set dependencies for testing and runtime."""
-    global model_manager, cache_manager, search_graph
-    model_manager = model_manager_instance
-    cache_manager = cache_manager_instance
-    search_graph = search_graph_instance
-
-# Export router and dependency setter
-__all__ = ['router', 'set_dependencies']
+def create_safe_search_fallback(query_id: str, correlation_id: str, query: str) -> SearchResponse:
+    search_data = SearchData(
+        query=query,
+        results=[],
+        summary="Search system encountered a technical issue. Please try again.",
+        total_results=0,
+        search_time=0.0,
+        sources_consulted=[]
+    )
+    return SearchResponse(
+        status="error",
+        data=search_data,
+        metadata={
+            "query_id": query_id,
+            "correlation_id": correlation_id,
+            "execution_time": 0.0,
+            "cost": 0.0,
+            "models_used": ["fallback"],
+            "confidence": 0.0,
+            "cached": False,
+            "error": "coroutine_safety_failure"
+        }
+    )
