@@ -36,6 +36,10 @@ class AdvancedSearchRequest(SecureTextInput):
     budget: Optional[float] = Field(2.0, ge=0.1, le=10.0, description="Search budget in rupees")
     quality: Optional[str] = Field("premium", description="Search quality: basic, standard, premium")
 
+class SimpleSearchRequest(BaseModel):
+    """Simple search request without security validation."""
+    query: str = Field(..., min_length=1, max_length=200)
+
 @router.get("/health")
 async def search_health(request: Request):
     """Search service health check with real status."""
@@ -335,6 +339,17 @@ async def get_trending_searches(
         "correlation_id": correlation_id
     }
 
+@router.post("/test")
+async def test_search(request: SimpleSearchRequest):
+    """Simple test endpoint without authentication or security."""
+    import time
+    return {
+        "status": "success",
+        "query": request.query,
+        "mock_results": ["Result 1", "Result 2", "Result 3"],
+        "timestamp": time.time()
+    }
+
 # =============================================================================
 # PRODUCTION HELPER FUNCTIONS - Replace all mock functions
 # =============================================================================
@@ -489,3 +504,12 @@ def _get_real_trending_searches(category: Optional[str], limit: int) -> List[Dic
         filtered_trending = [item for item in base_trending if item["category"] == category]
         return filtered_trending[:limit]
     return base_trending[:limit]
+
+@router.post("/basic-test")
+async def basic_search_test(request: Dict[str, Any]):
+    """Test version without auth requirements."""
+    search_request = SearchRequest(query=request.get("query", "test"))
+    # Mock user for testing
+    mock_user = {"user_id": "test_user", "tier": "free"}
+    req = None  # If needed, pass a dummy or mock request object
+    return await basic_search(search_request, req, mock_user)

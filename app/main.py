@@ -1,13 +1,21 @@
+# app/main.py
 """
 Production-ready main application with comprehensive initialization and monitoring.
-Integrates all components for a complete AI search system.
+Integrates all components for the complete AI search system with standardized providers.
 """
+import sys
+import os
+from pathlib import Path
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
 import asyncio
 import time
 from contextlib import asynccontextmanager
 from typing import Dict, Any
 from datetime import datetime
-import os
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,10 +30,8 @@ from app.api import chat, search
 from app.models.manager import ModelManager
 from app.cache.redis_client import CacheManager
 from app.graphs.chat_graph import ChatGraph
-from app.schemas.responses import HealthStatus, create_error_response
-from app.providers.router import SmartSearchRouter
 from app.graphs.search_graph import SearchGraph
-from app.performance.optimization import OptimizedSearchSystem
+from app.schemas.responses import HealthStatus, create_error_response
 
 
 # Global state for application components
@@ -38,10 +44,10 @@ logger = get_logger("main")
 async def lifespan(app: FastAPI):
     """
     Application lifespan management.
-    Handles startup and shutdown procedures.
+    Handles startup and shutdown procedures for the standardized architecture.
     """
     # Startup
-    logger.info("🚀 Starting AI Search System")
+    logger.info("🚀 Starting AI Search System with Standardized Providers")
     
     try:
         # Initialize logging
@@ -77,21 +83,39 @@ async def lifespan(app: FastAPI):
         app_state["chat_graph"] = chat_graph
         logger.info("✅ Chat graph initialized")
         
-        # Set dependencies for API modules
-        chat.set_dependencies(model_manager, app_state["cache_manager"], chat_graph)
+        # Initialize search graph with standardized providers
+        logger.info("🔍 Initializing search graph with Brave + ScrapingBee...")
+        search_graph = SearchGraph(model_manager, app_state["cache_manager"])
+        app_state["search_graph"] = search_graph
+        logger.info("✅ Search graph initialized")
         
-        # Initialize search system components
-        logger.info("🔍 Initializing search system components...")
-        search_router_instance = SmartSearchRouter(
-            brave_api_key=os.getenv("BRAVE_API_KEY", settings.brave_search_api_key or settings.BRAVE_API_KEY),
-            scrapingbee_api_key=os.getenv("SCRAPINGBEE_API_KEY", getattr(settings, "SCRAPINGBEE_API_KEY", None))
-        )
-        await search_router_instance.__aenter__()
-        search_graph = SearchGraph(search_router_instance)
-        optimized_system = OptimizedSearchSystem(search_router_instance, search_graph)
-        app_state["search_system"] = optimized_system
-        app_state["search_router"] = search_router_instance
-        logger.info("✅ Search system components initialized")
+        # Validate provider configuration
+        logger.info("🔑 Validating provider API keys...")
+        api_key_status = {
+            "brave_search": bool(getattr(settings, 'brave_search_api_key', None) or 
+                                getattr(settings, 'BRAVE_API_KEY', None) or 
+                                os.getenv('BRAVE_API_KEY')),
+            "scrapingbee": bool(getattr(settings, 'scrapingbee_api_key', None) or 
+                               getattr(settings, 'SCRAPINGBEE_API_KEY', None) or 
+                               os.getenv('SCRAPINGBEE_API_KEY'))
+        }
+        
+        app_state["api_key_status"] = api_key_status
+        
+        if api_key_status["brave_search"]:
+            logger.info("✅ Brave Search API key configured")
+        else:
+            logger.warning("⚠️  Brave Search API key not found - search functionality will be limited")
+        
+        if api_key_status["scrapingbee"]:
+            logger.info("✅ ScrapingBee API key configured")
+        else:
+            logger.warning("⚠️  ScrapingBee API key not found - content enhancement disabled")
+        
+        # Set dependencies for API modules
+        chat.set_dependencies(model_manager, app_state["cache_manager"], chat_graph)  # KEEP THIS
+        # search.set_dependencies(model_manager, app_state["cache_manager"], search_graph)  # COMMENTED OUT AS REQUESTED
+        logger.info("✅ API dependencies configured")
         
         # Application startup complete
         startup_time = time.time()
@@ -99,6 +123,7 @@ async def lifespan(app: FastAPI):
         
         logger.info("🎉 AI Search System startup completed successfully")
         logger.info(f"📊 Components initialized: {len(app_state)} components")
+        logger.info(f"🏗️  Architecture: Standardized Providers (Brave + ScrapingBee)")
         
         yield
         
@@ -110,6 +135,14 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Shutting down AI Search System...")
     
     try:
+        # Cleanup search graph (and its providers)
+        if "search_graph" in app_state:
+            try:
+                await app_state["search_graph"].cleanup()
+                logger.info("✅ Search graph and providers cleaned up")
+            except Exception as e:
+                logger.warning(f"⚠️  Search graph cleanup error: {e}")
+        
         # Cleanup model manager
         if "model_manager" in app_state:
             await app_state["model_manager"].cleanup()
@@ -117,13 +150,11 @@ async def lifespan(app: FastAPI):
         
         # Cleanup cache manager
         if "cache_manager" in app_state and app_state["cache_manager"]:
-            # Note: CacheManager cleanup would go here if implemented
-            logger.info("✅ Cache manager cleaned up")
-        
-        # Cleanup search router
-        if "search_router" in app_state and app_state["search_router"]:
-            await app_state["search_router"].__aexit__(None, None, None)
-            logger.info("✅ Search system cleaned up")
+            try:
+                await app_state["cache_manager"].close()
+                logger.info("✅ Cache manager cleaned up")
+            except Exception as e:
+                logger.warning(f"⚠️  Cache cleanup error: {e}")
         
         logger.info("✅ AI Search System shutdown completed")
         
@@ -134,8 +165,10 @@ async def lifespan(app: FastAPI):
 # Create FastAPI application
 app = FastAPI(
     title="AI Search System",
-    description="Intelligent AI-powered search with cost optimization",
+    description="Intelligent AI-powered search with Brave Search and ScrapingBee integration",
     version="1.0.0",
+    docs_url="/docs" if settings.environment != "production" else None,
+    redoc_url="/redoc" if settings.environment != "production" else None,
     lifespan=lifespan
 )
 
@@ -153,6 +186,44 @@ app.add_middleware(SecurityMiddleware, enable_rate_limiting=True)
 
 # Add logging middleware
 app.add_middleware(LoggingMiddleware)
+
+
+# Performance monitoring middleware
+@app.middleware("http")
+async def performance_tracking_middleware(request: Request, call_next):
+    """Middleware to track request performance."""
+    start_time = time.time()
+    
+    try:
+        response = await call_next(request)
+        response_time = time.time() - start_time
+        
+        # Add performance headers
+        response.headers["X-Response-Time"] = str(round(response_time * 1000, 2))
+        response.headers["X-Request-ID"] = get_correlation_id()
+        
+        # Log slow requests
+        if response_time > 5.0:  # 5 seconds
+            logger.warning(
+                "Slow request detected",
+                method=request.method,
+                url=str(request.url),
+                response_time=response_time,
+                status_code=response.status_code
+            )
+        
+        return response
+    
+    except Exception as e:
+        response_time = time.time() - start_time
+        logger.error(
+            "Request failed",
+            method=request.method,
+            url=str(request.url),
+            response_time=response_time,
+            error=str(e)
+        )
+        raise
 
 
 # Health check endpoints
@@ -205,12 +276,26 @@ async def health_check():
             components["chat_graph"] = "not_initialized"
             overall_healthy = False
         
-        # Check search system
-        if "search_system" in app_state and app_state["search_system"]:
-            components["search_system"] = "healthy"
+        # Check search graph
+        if "search_graph" in app_state:
+            components["search_graph"] = "healthy"
         else:
-            components["search_system"] = "not_initialized"
+            components["search_graph"] = "not_initialized"
             overall_healthy = False
+        
+        # Check provider API keys
+        api_key_status = app_state.get("api_key_status", {})
+        if api_key_status.get("brave_search", False):
+            components["brave_search"] = "configured"
+        else:
+            components["brave_search"] = "not_configured"
+            # Don't mark as unhealthy since system can work without it
+        
+        if api_key_status.get("scrapingbee", False):
+            components["scrapingbee"] = "configured"
+        else:
+            components["scrapingbee"] = "not_configured"
+            # Don't mark as unhealthy since it's optional
         
         # Calculate uptime
         uptime = None
@@ -236,7 +321,7 @@ async def health_check():
 @app.get("/health/ready")
 async def readiness_check():
     """Kubernetes readiness probe endpoint."""
-    required_components = ["model_manager", "chat_graph"]
+    required_components = ["model_manager", "chat_graph", "search_graph"]
     
     for component in required_components:
         if component not in app_state:
@@ -254,28 +339,92 @@ async def liveness_check():
     return {"status": "alive"}
 
 
+@app.get("/system/status")
+async def system_status():
+    """Detailed system status endpoint."""
+    try:
+        # Component status
+        redis_status = "disconnected"
+        ollama_status = "disconnected"
+        
+        if "cache_manager" in app_state and app_state["cache_manager"]:
+            redis_status = "connected"
+        
+        if "model_manager" in app_state:
+            try:
+                stats = app_state["model_manager"].get_model_stats()
+                ollama_status = "connected"
+            except:
+                ollama_status = "error"
+        
+        # Provider status
+        api_key_status = app_state.get("api_key_status", {})
+        
+        # Calculate uptime
+        uptime = None
+        if "startup_time" in app_state:
+            uptime = time.time() - app_state["startup_time"]
+        
+        return {
+            "status": "operational",
+            "components": {
+                "redis": redis_status,
+                "ollama": ollama_status,
+                "api": "healthy",
+                "search_graph": "initialized" if "search_graph" in app_state else "not_initialized",
+                "chat_graph": "initialized" if "chat_graph" in app_state else "not_initialized"
+            },
+            "providers": {
+                "brave_search": "configured" if api_key_status.get("brave_search", False) else "not_configured",
+                "scrapingbee": "configured" if api_key_status.get("scrapingbee", False) else "not_configured"
+            },
+            "version": "1.0.0",
+            "uptime": uptime,
+            "timestamp": time.time(),
+            "architecture": "standardized_providers"
+        }
+    except Exception as e:
+        return {
+            "status": "degraded",
+            "error": str(e),
+            "timestamp": time.time()
+        }
+
+
 @app.get("/metrics")
 async def get_metrics():
     """Basic metrics endpoint for monitoring."""
     try:
-        # Get graph stats
-        if hasattr(app.state, "chat_graph") and app.state.chat_graph:
-            graph_stats = app.state.chat_graph.get_performance_stats()
-        else:
-            graph_stats = {"error": "Chat graph not available"}
-        
-        # Get model stats
-        if hasattr(app.state, "model_manager") and app.state.model_manager:
-            model_stats = app.state.model_manager.get_model_stats()
-        else:
-            model_stats = {"error": "Model manager not available"}
-        
-        return {
+        metrics = {
             "status": "operational",
             "timestamp": datetime.now().isoformat(),
-            "graph_stats": graph_stats,
-            "model_stats": model_stats
         }
+        
+        # Get chat graph stats
+        if "chat_graph" in app_state:
+            try:
+                graph_stats = app_state["chat_graph"].get_performance_stats()
+                metrics["chat_graph"] = graph_stats
+            except Exception as e:
+                metrics["chat_graph"] = {"error": str(e)}
+        
+        # Get model stats
+        if "model_manager" in app_state:
+            try:
+                model_stats = app_state["model_manager"].get_model_stats()
+                metrics["models"] = model_stats
+            except Exception as e:
+                metrics["models"] = {"error": str(e)}
+        
+        # Add provider availability
+        api_key_status = app_state.get("api_key_status", {})
+        metrics["providers"] = {
+            "brave_search_available": api_key_status.get("brave_search", False),
+            "scrapingbee_available": api_key_status.get("scrapingbee", False)
+        }
+        
+        return metrics
+        
     except Exception as e:
         logger.error("Metrics collection failed", error=str(e))
         raise HTTPException(status_code=500, detail="Metrics collection failed")
@@ -387,28 +536,40 @@ app.include_router(
 @app.get("/")
 async def root():
     """Root endpoint with system information."""
+    api_key_status = app_state.get("api_key_status", {})
+    
     return {
         "name": "AI Search System",
         "version": "1.0.0",
         "status": "operational",
         "environment": settings.environment,
+        "architecture": "standardized_providers",
         "docs_url": "/docs" if settings.environment != "production" else None,
         "health_url": "/health",
         "api_endpoints": {
             "chat": "/api/v1/chat/complete",
             "chat_stream": "/api/v1/chat/stream",
-            "search": "/api/v1/search/basic",
+            "search_basic": "/api/v1/search/basic",
+            "search_advanced": "/api/v1/search/advanced",
             "health": "/health",
-            "metrics": "/metrics"
+            "metrics": "/metrics",
+            "system_status": "/system/status"
         },
         "features": [
             "Intelligent conversation management",
             "Multi-model AI orchestration", 
             "Real-time streaming responses",
+            "Brave Search integration",
+            "ScrapingBee content enhancement",
+            "Smart cost optimization",
             "Context-aware processing",
-            "Cost optimization",
             "Performance monitoring"
-        ]
+        ],
+        "providers": {
+            "brave_search": "configured" if api_key_status.get("brave_search", False) else "not_configured",
+            "scrapingbee": "configured" if api_key_status.get("scrapingbee", False) else "not_configured",
+            "local_models": "ollama"
+        }
     }
 
 
@@ -429,19 +590,21 @@ if settings.environment != "production":
                 debug_state[key] = {
                     "type": "CacheManager",
                     "available": value is not None,
-                    "metrics": value.metrics.__dict__ if value and hasattr(value, 'metrics') else None
+                    "connected": value is not None
                 }
             elif key == "chat_graph":
                 debug_state[key] = {
                     "type": "ChatGraph",
-                    "stats": value.get_performance_stats() if hasattr(value, 'get_performance_stats') else None
+                    "initialized": True
                 }
-            elif key == "search_system":
+            elif key == "search_graph":
                 debug_state[key] = {
-                    "type": "OptimizedSearchSystem",
-                    "available": value is not None,
-                    "status": value.get_system_status() if hasattr(value, 'get_system_status') else None
+                    "type": "SearchGraph", 
+                    "initialized": True,
+                    "providers": "brave_search + scrapingbee"
                 }
+            elif key == "api_key_status":
+                debug_state[key] = value
             else:
                 debug_state[key] = str(type(value))
         
@@ -451,7 +614,8 @@ if settings.environment != "production":
                 "environment": settings.environment,
                 "debug": settings.debug,
                 "ollama_host": settings.ollama_host,
-                "redis_url": settings.redis_url.split('@')[-1] if '@' in settings.redis_url else settings.redis_url  # Hide credentials
+                "redis_url": settings.redis_url.split('@')[-1] if '@' in settings.redis_url else settings.redis_url,  # Hide credentials
+                "log_level": settings.log_level
             }
         }
     
@@ -474,13 +638,42 @@ if settings.environment != "production":
             
             return {
                 "success": True,
-                "response": result.final_response,
-                "execution_time": result.calculate_total_time(),
-                "cost": result.calculate_total_cost(),
-                "confidence": result.get_avg_confidence(),
-                "execution_path": result.execution_path,
-                "errors": result.errors,
-                "warnings": result.warnings
+                "response": getattr(result, 'final_response', 'No response generated'),
+                "execution_time": getattr(result, 'execution_time', 0),
+                "cost": result.calculate_total_cost() if hasattr(result, 'calculate_total_cost') else 0,
+                "execution_path": getattr(result, 'execution_path', [])
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    @app.post("/debug/test-search")
+    async def debug_test_search(query: str = "latest AI developments"):
+        """Debug endpoint to test search functionality."""
+        try:
+            if "search_graph" not in app_state:
+                return {"error": "Search graph not initialized"}
+            
+            from app.graphs.search_graph import execute_search
+            
+            result = await execute_search(
+                query=query,
+                model_manager=app_state["model_manager"],
+                cache_manager=app_state["cache_manager"],
+                budget=2.0,
+                quality="balanced",
+                max_results=5
+            )
+            
+            return {
+                "success": result.get("success", False),
+                "query": query,
+                "response": result.get("response", "No response"),
+                "metadata": result.get("metadata", {}),
+                "providers_used": result.get("metadata", {}).get("providers_used", [])
             }
             
         except Exception as e:
@@ -512,9 +705,27 @@ if __name__ == "__main__":
     }
     
     print(f"🚀 Starting AI Search System in {settings.environment} mode")
+    print(f"🏗️  Architecture: Standardized Providers (Brave + ScrapingBee)")
     print(f"📍 Server will be available at http://{settings.api_host}:{settings.api_port}")
     print(f"📚 API documentation at http://{settings.api_host}:{settings.api_port}/docs")
     print(f"🏥 Health check at http://{settings.api_host}:{settings.api_port}/health")
+    print(f"📊 System status at http://{settings.api_host}:{settings.api_port}/system/status")
+    
+    # API key status
+    brave_key = (getattr(settings, 'brave_search_api_key', None) or 
+                getattr(settings, 'BRAVE_API_KEY', None) or 
+                os.getenv('BRAVE_API_KEY'))
+    scrapingbee_key = (getattr(settings, 'scrapingbee_api_key', None) or 
+                      getattr(settings, 'SCRAPINGBEE_API_KEY', None) or 
+                      os.getenv('SCRAPINGBEE_API_KEY'))
+    
+    print(f"🔑 Brave Search: {'✅ Configured' if brave_key else '❌ Not configured'}")
+    print(f"🔑 ScrapingBee: {'✅ Configured' if scrapingbee_key else '❌ Not configured'}")
+    
+    if not brave_key:
+        print("⚠️  Warning: No Brave Search API key found. Set BRAVE_API_KEY environment variable.")
+    if not scrapingbee_key:
+        print("⚠️  Warning: No ScrapingBee API key found. Set SCRAPINGBEE_API_KEY environment variable.")
     
     # Run the server
     uvicorn.run("app.main:app", **dev_config)
@@ -526,42 +737,32 @@ def get_asgi_application():
     return app
 
 
-# Gunicorn configuration (for production)
-"""
-For production deployment with Gunicorn, create gunicorn.conf.py:
-
-bind = "0.0.0.0:8000"
-workers = 4
-worker_class = "uvicorn.workers.UvicornWorker"
-worker_connections = 1000
-max_requests = 1000
-max_requests_jitter = 100
-timeout = 60
-keepalive = 2
-preload_app = True
-
-# Logging
-accesslog = "-"
-errorlog = "-"
-loglevel = "info"
-access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(D)s'
-
-# Process naming
-proc_name = "ai-search-system"
-
-# Worker tuning
-worker_tmp_dir = "/dev/shm"
-tmp_upload_dir = None
-
-# SSL (if needed)
-# keyfile = "/path/to/keyfile"
-# certfile = "/path/to/certfile"
-
-Run with: gunicorn -c gunicorn.conf.py app.main:app
-"""
+# Export for testing
+__all__ = [
+    'app', 
+    'create_app', 
+    'get_asgi_application',
+    'app_state'
+]
 
 
-# Kubernetes deployment helpers
+# Docker health check
+def docker_health_check():
+    """Health check function for Docker containers."""
+    import requests
+    import sys
+    
+    try:
+        response = requests.get("http://localhost:8000/health/live", timeout=5)
+        if response.status_code == 200:
+            sys.exit(0)
+        else:
+            sys.exit(1)
+    except Exception:
+        sys.exit(1)
+
+
+# Kubernetes deployment configuration
 def get_health_check_config():
     """Get health check configuration for Kubernetes."""
     return {
@@ -598,86 +799,38 @@ def get_health_check_config():
     }
 
 
-# Docker health check
-def docker_health_check():
-    """Health check function for Docker containers."""
-    import requests
-    import sys
-    
-    try:
-        response = requests.get("http://localhost:8000/health/live", timeout=5)
-        if response.status_code == 200:
-            sys.exit(0)
-        else:
-            sys.exit(1)
-    except Exception:
-        sys.exit(1)
+"""
+Production deployment configuration:
 
+For Gunicorn (gunicorn.conf.py):
+```python
+bind = "0.0.0.0:8000"
+workers = 4
+worker_class = "uvicorn.workers.UvicornWorker"
+worker_connections = 1000
+max_requests = 1000
+max_requests_jitter = 100
+timeout = 60
+keepalive = 2
+preload_app = True
 
-# Performance monitoring utilities
-class PerformanceMonitor:
-    """Simple performance monitoring utilities."""
-    
-    def __init__(self):
-        self.request_count = 0
-        self.total_response_time = 0.0
-        self.error_count = 0
-    
-    def record_request(self, response_time: float, is_error: bool = False):
-        """Record a request for performance monitoring."""
-        self.request_count += 1
-        self.total_response_time += response_time
-        if is_error:
-            self.error_count += 1
-    
-    def get_stats(self):
-        """Get performance statistics."""
-        if self.request_count == 0:
-            return {"requests": 0, "avg_response_time": 0, "error_rate": 0}
-        
-        return {
-            "requests": self.request_count,
-            "avg_response_time": self.total_response_time / self.request_count,
-            "error_rate": self.error_count / self.request_count,
-            "total_errors": self.error_count
-        }
+# Logging
+accesslog = "-"
+errorlog = "-"
+loglevel = "info"
 
+# Process naming
+proc_name = "ai-search-system"
 
-# Global performance monitor
-performance_monitor = PerformanceMonitor()
+# Worker tuning
+worker_tmp_dir = "/dev/shm"
+```
 
+Run with: gunicorn -c gunicorn.conf.py app.main:app
 
-# Middleware to track performance
-@app.middleware("http")
-async def performance_tracking_middleware(request: Request, call_next):
-    """Middleware to track request performance."""
-    start_time = time.time()
-    
-    try:
-        response = await call_next(request)
-        response_time = time.time() - start_time
-        
-        # Record performance metrics
-        is_error = response.status_code >= 400
-        performance_monitor.record_request(response_time, is_error)
-        
-        # Add performance headers
-        response.headers["X-Response-Time"] = str(round(response_time * 1000, 2))
-        response.headers["X-Request-ID"] = get_correlation_id()
-        
-        return response
-    
-    except Exception as e:
-        response_time = time.time() - start_time
-        performance_monitor.record_request(response_time, True)
-        raise
-
-
-# Export for testing
-__all__ = [
-    'app', 
-    'create_app', 
-    'get_asgi_application',
-    'app_state',
-    'performance_monitor'
-]
+Environment Variables Required:
+- BRAVE_API_KEY=your_brave_search_api_key
+- SCRAPINGBEE_API_KEY=your_scrapingbee_api_key  
+- REDIS_URL=redis://localhost:6379
+- OLLAMA_HOST=http://localhost:11434
+"""

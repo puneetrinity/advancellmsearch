@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sse_starlette.sse import EventSourceResponse
+from datetime import datetime
 
 from app.core.logging import get_logger, get_correlation_id, set_correlation_id, log_performance
 from app.core.config import get_settings
@@ -25,6 +26,7 @@ from app.schemas.responses import (
     create_error_response, ConversationContext
 )
 from app.performance.optimization import OptimizedSearchSystem
+from app.graphs.base import GraphState
 
 
 router = APIRouter()
@@ -71,14 +73,14 @@ class ChatRequest(SecureChatInput):
         return v
 
 
-class StreamingChatRequest(SecureChatInput):
+class StreamingChatRequest(BaseModel):
     """OpenAI-compatible streaming chat request."""
     messages: List[Dict[str, str]] = Field(..., description="Conversation messages")
-    model: Optional[str] = Field("auto", description="Model preference (auto-select if 'auto')")
+    model: Optional[str] = Field("auto", description="Model preference")
     max_tokens: Optional[int] = Field(300, ge=1, le=2000)
     temperature: Optional[float] = Field(0.7, ge=0.0, le=2.0)
     stream: bool = Field(True, description="Enable streaming")
-    session_id: Optional[str] = Field(None, description="Session ID for context")
+    session_id: Optional[str] = Field(None, description="Session ID")
 
     @field_validator('messages')
     @classmethod
@@ -380,13 +382,36 @@ async def chat_endpoint(
         return await fallback_chat_response(request)
 
 async def fallback_chat_response(request: ChatRequest) -> ChatResponse:
+    # Provide all required fields for ChatResponse and BaseResponse
+    now = datetime.now().isoformat()
     return ChatResponse(
-        message="I'm experiencing some technical difficulties with my search capabilities. How else can I help you?",
-        query_id=f"fallback_{int(time.time())}",
-        model_used="fallback",
-        response_time=0.1,
-        cost=0.0,
-        metadata={"search_enabled": False, "fallback_used": True}
+        status="error",
+        data={
+            "response": "I'm experiencing some technical difficulties with my search capabilities. How else can I help you?",
+            "session_id": getattr(request, 'session_id', 'unknown')
+        },
+        metadata={
+            "query_id": f"fallback_{int(time.time())}",
+            "execution_time": 0.1,
+            "cost": 0.0,
+            "models_used": ["fallback"],
+            "confidence": 0.0,
+            "cached": False,
+            "timestamp": now
+        },
+        cost_prediction={
+            "estimated_cost": 0.0,
+            "cost_breakdown": [],
+            "savings_tips": []
+        },
+        developer_hints={
+            "routing_explanation": "Fallback response due to error.",
+            "execution_path": ["fallback"],
+            "performance": {},
+            "suggested_next_queries": [],
+            "potential_optimizations": {},
+            "knowledge_gaps": []
+        }
     )
 
 

@@ -1,8 +1,7 @@
 import os
 
 # This script updates all Python files in the codebase to use the new import for BaseSettings from pydantic-settings.
-# It replaces: from pydantic_settings import BaseSettings
-from pydantic import Field
+# It replaces: from pydantic_settings import BaseSettings\nfrom pydantic import Field
 # With: from pydantic_settings import BaseSettings\nfrom pydantic import Field
 
 def update_imports(root_dir):
@@ -13,8 +12,7 @@ def update_imports(root_dir):
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                 new_content = content.replace(
-                    'from pydantic_settings import BaseSettings
-from pydantic import Field',
+                    'from pydantic_settings import BaseSettings\nfrom pydantic import Field',
                     'from pydantic_settings import BaseSettings\nfrom pydantic import Field'
                 )
                 if new_content != content:

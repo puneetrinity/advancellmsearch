@@ -11,7 +11,13 @@ from pydantic import Field
 
 
 class Settings(BaseSettings):
-    """Application settings with environment variable support"""
+    """Application settings with environment variable support
+    Provider configs (API keys, timeouts, etc) are loaded from environment variables or .env file.
+    Use get_settings() to access per-environment config.
+    Example usage for providers:
+        brave_search_api_key: str = ...
+        scrapingbee_api_key: str = ...
+    """
     
     # Application
     app_name: str = "AI Search System"

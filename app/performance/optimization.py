@@ -326,6 +326,69 @@ class PerformanceOptimizer:
         return recommendations
 
 class OptimizedSearchSystem:
+    """
+    The OptimizedSearchSystem class that your main.py expects
+    """
+    def __init__(self, search_router, search_graph):
+        self.search_router = search_router
+        self.search_graph = search_graph
+        self.stats = {
+            "total_searches": 0,
+            "total_cost": 0.0,
+            "avg_response_time": 0.0,
+            "cache_hits": 0
+        }
+        logger.info("OptimizedSearchSystem initialized")
+    async def execute_optimized_search(self, query: str, **kwargs) -> Dict[str, Any]:
+        """Perform optimized search with performance tracking"""
+        start_time = time.time()
+        try:
+            # Use the search router to perform search
+            results = await self.search_router.search(query)
+            # Update stats
+            self.stats["total_searches"] += 1
+            response_time = time.time() - start_time
+            # Update average response time
+            total_time = self.stats["avg_response_time"] * (self.stats["total_searches"] - 1)
+            self.stats["avg_response_time"] = (total_time + response_time) / self.stats["total_searches"]
+            logger.info("Optimized search completed",
+                       query=query,
+                       results_count=len(results),
+                       response_time=response_time)
+            return {
+                "query": query,
+                "results": results,
+                "metadata": {
+                    "response_time": response_time,
+                    "results_count": len(results),
+                    "optimization_applied": True
+                }
+            }
+        except Exception as e:
+            logger.error(f"Optimized search failed: {e}")
+            return {
+                "query": query,
+                "results": [],
+                "error": str(e),
+                "metadata": {
+                    "response_time": time.time() - start_time,
+                    "results_count": 0,
+                    "optimization_applied": False
+                }
+            }
+    def get_system_status(self) -> Dict[str, Any]:
+        """Get system status for the debug endpoint"""
+        return {
+            "status": "operational",
+            "stats": self.stats,
+            "search_router_available": self.search_router is not None,
+            "search_graph_available": self.search_graph is not None
+        }
+    def get_performance_metrics(self) -> Dict[str, Any]:
+        """Get performance metrics"""
+        return self.stats
+
+class OptimizedSearchSystem:
     """Complete optimized search system"""
     
     def __init__(self, search_router, search_graph):

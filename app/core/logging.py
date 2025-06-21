@@ -238,20 +238,53 @@ class PerformanceLogger:
             )
 
 def log_performance(operation_name: str):
-    """Decorator for automatic performance logging."""
+    """Decorator for automatic performance logging - FastAPI compatible."""
     def decorator(func):
-        if hasattr(func, '__call__'):
-            if hasattr(func, '__await__'):  # async function
-                async def async_wrapper(*args, **kwargs):
-                    with PerformanceLogger(f"{func.__name__}:{operation_name}"):
-                        return await func(*args, **kwargs)
-                return async_wrapper
-            else:  # sync function
-                def sync_wrapper(*args, **kwargs):
-                    with PerformanceLogger(f"{func.__name__}:{operation_name}"):
-                        return func(*args, **kwargs)
-                return sync_wrapper
-        return func
+        import functools
+        if hasattr(func, '__await__'):  # async function
+            @functools.wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                import time
+                import structlog
+                logger = structlog.get_logger("performance")
+                start_time = time.time()
+                logger.debug(f"{operation_name} started")
+                try:
+                    result = await func(*args, **kwargs)
+                    duration = time.time() - start_time
+                    logger.info(
+                        f"{operation_name} completed",
+                        duration_ms=round(duration * 1000, 2),
+                        correlation_id=get_correlation_id()
+                    )
+                    return result
+                except Exception as e:
+                    duration = time.time() - start_time
+                    logger.error(
+                        f"{operation_name} failed",
+                        duration_ms=round(duration * 1000, 2),
+                        error=str(e),
+                        correlation_id=get_correlation_id()
+                    )
+                    raise
+            return async_wrapper
+        else:
+            @functools.wraps(func)
+            def sync_wrapper(*args, **kwargs):
+                import time
+                import structlog
+                logger = structlog.get_logger("performance")
+                start_time = time.time()
+                try:
+                    result = func(*args, **kwargs)
+                    duration = time.time() - start_time
+                    logger.info(f"{operation_name} completed", duration_ms=round(duration * 1000, 2))
+                    return result
+                except Exception as e:
+                    duration = time.time() - start_time
+                    logger.error(f"{operation_name} failed", duration_ms=round(duration * 1000, 2), error=str(e))
+                    raise
+            return sync_wrapper
     return decorator
 
 # Export main functions

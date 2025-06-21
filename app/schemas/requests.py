@@ -47,29 +47,33 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     """Non-streaming chat request"""
     message: str = Field(..., description="User message", min_length=1, max_length=8000)
-    session_id: Optional[str] = Field(None, description="Session ID for conversation continuity")
-    context: Optional[Context] = Field(None, description="Additional context")
-    constraints: Optional[Constraints] = Field(None, description="Request constraints")
-    
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "message": "Explain how async/await works in Python",
-                "session_id": "session_123",
-                "context": {
-                    "user_preferences": {
-                        "response_style": "detailed",
-                        "technical_level": "intermediate"
-                    }
-                },
-                "constraints": {
-                    "max_cost": 0.10,
-                    "max_time": 10.0,
-                    "quality_requirement": "high"
-                }
-            }
-        }
-    }
+    session_id: Optional[str] = Field(None, description="Conversation session ID")
+    user_context: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional user context")
+    # Quality and performance controls
+    quality_requirement: Optional[str] = Field("balanced", description="Quality level: minimal, balanced, high, premium")
+    max_cost: Optional[float] = Field(0.10, ge=0.0, le=1.0, description="Maximum cost in INR")
+    max_execution_time: Optional[float] = Field(30.0, ge=1.0, le=120.0, description="Maximum execution time")
+    force_local_only: Optional[bool] = Field(False, description="Force local models only")
+    # Response preferences
+    response_style: Optional[str] = Field("balanced", description="Response style: concise, balanced, detailed")
+    include_sources: Optional[bool] = Field(True, description="Include sources and citations")
+    include_debug_info: Optional[bool] = Field(False, description="Include debug information")
+
+    @field_validator('quality_requirement')
+    @classmethod
+    def validate_quality(cls, v):
+        valid_qualities = ["minimal", "balanced", "high", "premium"]
+        if v not in valid_qualities:
+            raise ValueError(f"Quality must be one of: {valid_qualities}")
+        return v
+
+    @field_validator('response_style')
+    @classmethod
+    def validate_style(cls, v):
+        valid_styles = ["concise", "balanced", "detailed"]
+        if v not in valid_styles:
+            raise ValueError(f"Style must be one of: {valid_styles}")
+        return v
 
 
 class ChatStreamRequest(BaseModel):
