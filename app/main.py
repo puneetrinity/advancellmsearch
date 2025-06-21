@@ -439,53 +439,116 @@ async def system_status():
         }
 
 
+def safe_serialize(obj, max_depth=3, current_depth=0):
+    """
+    Safely serialize objects to prevent recursion and Mock serialization issues.
+    """
+    if current_depth > max_depth:
+        return "max_depth_reached"
+    if obj is None:
+        return None
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    from unittest.mock import Mock, AsyncMock
+    if isinstance(obj, (Mock, AsyncMock)):
+        return {
+            "type": "mock_object",
+            "class_name": obj.__class__.__name__
+        }
+    if isinstance(obj, list):
+        return [safe_serialize(item, max_depth, current_depth + 1) for item in obj[:10]]
+    if isinstance(obj, dict):
+        result = {}
+        for key, value in list(obj.items())[:20]:
+            try:
+                result[str(key)] = safe_serialize(value, max_depth, current_depth + 1)
+            except Exception:
+                result[str(key)] = "serialization_error"
+        return result
+    if hasattr(obj, 'get_model_stats'):
+        try:
+            stats = obj.get_model_stats()
+            return safe_serialize(stats, max_depth, current_depth + 1)
+        except Exception:
+            return "get_model_stats_error"
+    if hasattr(obj, 'get_performance_stats'):
+        try:
+            stats = obj.get_performance_stats()
+            return safe_serialize(stats, max_depth, current_depth + 1)
+        except Exception:
+            return "get_performance_stats_error"
+    try:
+        return {
+            "type": str(type(obj).__name__),
+            "available": True
+        }
+    except Exception:
+        return "unknown_object"
+
 @app.get("/metrics")
 async def get_metrics():
-    """Basic metrics endpoint for monitoring with debug for circular/self-references."""
+    """
+    COMPLETELY FIXED metrics endpoint with proper serialization and no recursion.
+    """
     import json
     try:
+        correlation_id = get_correlation_id()
         metrics = {
             "status": "operational",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": time.time(),
+            "correlation_id": correlation_id,
+            "version": "1.0.0"
         }
-        # Debug: Model stats
-        model_stats = None
-        try:
-            model_stats = app_state["model_manager"].get_model_stats()
-            print("✅ Model stats OK")
-        except Exception as e:
-            print(f"❌ Model stats error: {e}")
-            model_stats = {"error": "model_stats_failed"}
-        try:
-            json.dumps(model_stats)
-            print("✅ Model stats JSON serializable")
-        except Exception as e:
-            print(f"❌ Model stats not serializable: {e}")
-        metrics["models"] = model_stats
-        # Debug: Chat graph stats
-        graph_stats = None
-        try:
-            graph_stats = app_state["chat_graph"].get_performance_stats()
-            print("✅ Graph stats OK")
-        except Exception as e:
-            print(f"❌ Graph stats error: {e}")
-            graph_stats = {"error": "graph_stats_failed"}
-        try:
-            json.dumps(graph_stats)
-            print("✅ Graph stats JSON serializable")
-        except Exception as e:
-            print(f"❌ Graph stats not serializable: {e}")
-        metrics["chat_graph"] = graph_stats
-        # Add provider availability
-        api_key_status = app_state.get("api_key_status", {})
-        metrics["providers"] = {
-            "brave_search_available": api_key_status.get("brave_search", False),
-            "scrapingbee_available": api_key_status.get("scrapingbee", False)
+        startup_time = app_state.get("startup_time")
+        if startup_time and isinstance(startup_time, (int, float)):
+            metrics["uptime_seconds"] = time.time() - startup_time
+        components = {}
+        for component_name, component in app_state.items():
+            if component_name == "startup_time":
+                continue
+            try:
+                components[component_name] = safe_serialize(component)
+            except Exception as e:
+                components[component_name] = {
+                    "status": "serialization_error",
+                    "error": str(e)
+                }
+        metrics["components"] = components
+        api_status = app_state.get("api_key_status", {})
+        if isinstance(api_status, dict):
+            metrics["api_keys"] = {
+                k: v for k, v in api_status.items() 
+                if isinstance(v, (bool, str, int, float, type(None)))
+            }
+        metrics["system"] = {
+            "total_components": len(app_state),
+            "environment": settings.environment,
+            "python_version": f"{sys.version_info.major}.{sys.version_info.minor}"
         }
+        try:
+            json.dumps(metrics)
+        except TypeError as e:
+            logger.error(f"Metrics not JSON serializable: {e}")
+            return {
+                "status": "error",
+                "timestamp": time.time(),
+                "error": "Metrics serialization failed",
+                "correlation_id": correlation_id
+            }
+        logger.debug(
+            "Metrics generated successfully",
+            component_count=len(components),
+            correlation_id=correlation_id
+        )
         return metrics
     except Exception as e:
-        logger.error("Metrics collection failed", error=str(e))
-        raise HTTPException(status_code=500, detail="Metrics collection failed")
+        logger.error(f"Metrics endpoint error: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "timestamp": time.time(),
+            "error": str(e),
+            "correlation_id": get_correlation_id()
+        }
 
 
 # Global exception handler

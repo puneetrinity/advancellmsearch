@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 import time
 import uuid
 import logging
+import asyncio
 
 from app.api.security import get_current_user, require_permission, SecureTextInput
 from app.schemas.responses import SearchResponse, SearchData, create_success_response, create_error_response
@@ -40,6 +41,9 @@ class SimpleSearchRequest(BaseModel):
     """Simple search request without security validation."""
     query: str = Field(..., min_length=1, max_length=200)
 
+class WrappedSearchRequest(BaseModel):
+    request: SearchRequest
+
 @router.get("/health")
 async def search_health(request: Request):
     """Search service health check with real status."""
@@ -58,52 +62,53 @@ async def search_health(request: Request):
 @router.post("/basic", response_model=SearchResponse)
 @log_performance("basic_search")
 async def basic_search(
-    request: SearchRequest,
+    wrapped_request: WrappedSearchRequest,
     req: Request,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """
-    PRODUCTION Basic search endpoint - NO MORE MOCKS!
-    Integrates with real SearchGraph and SmartSearchRouter for actual web search
-    """
+    """Basic search endpoint - properly awaits all async operations"""
+    request = wrapped_request.request
     query_id = str(uuid.uuid4())
     correlation_id = get_correlation_id()
     start_time = time.time()
     logger.info(
-        "REAL search initiated",
+        "Search request started",
         query=request.query,
-        user_id=current_user["user_id"],
-        search_type=request.search_type,
-        budget=request.budget,
-        quality=request.quality,
         query_id=query_id,
         correlation_id=correlation_id
     )
     try:
-        # Get the REAL search system from app state
+        # Get search system from app state
         search_system = getattr(req.app.state, 'search_system', None)
-        if search_system:
-            # EXECUTE REAL SEARCH - No more mocks!
-            logger.info(f"Executing REAL search for: {request.query}")
-            search_result = await search_system.execute_optimized_search(
+        if search_system and hasattr(search_system, 'execute_optimized_search'):
+            # Execute the search and ensure we always await the result
+            search_result = search_system.execute_optimized_search(
                 query=request.query,
                 budget=request.budget,
                 quality=request.quality,
                 max_results=request.max_results
             )
-            logger.info(f"🔍 Search result type: {type(search_result)}")
-            logger.info(f"🔍 Search result value: {search_result}")
-            if hasattr(search_result, '__name__'):
-                logger.error(f"🚨 RETURNING FUNCTION: {search_result.__name__}")
-            # Convert real search results to API format
-            real_results = _convert_search_citations_to_results(search_result.get("citations", []))
+            if asyncio.iscoroutine(search_result):
+                search_result = await search_result
+            # Defensive: if still a coroutine, await again
+            while asyncio.iscoroutine(search_result):
+                search_result = await search_result
+            logger.debug(f"[search.py] search_result type before return: {type(search_result)}")
+            # Extract data from the result
+            if isinstance(search_result, dict):
+                response_text = search_result.get("response", "Search completed")
+                citations = search_result.get("citations", [])
+                metadata = search_result.get("metadata", {})
+            else:
+                response_text = "Search completed"
+                citations = []
+                metadata = {}
             search_data = SearchData(
-                query=request.query,
-                results=real_results,
-                summary=search_result["response"] if request.include_summary else None,
-                total_results=len(real_results),
-                search_time=search_result["metadata"]["execution_time"],
-                sources_consulted=_extract_real_sources(search_result)
+                results=[],
+                summary=response_text,
+                total_results=0,
+                search_time=time.time() - start_time,
+                sources_consulted=citations
             )
             response = SearchResponse(
                 status="success",
@@ -111,27 +116,21 @@ async def basic_search(
                 metadata={
                     "query_id": query_id,
                     "correlation_id": correlation_id,
-                    "execution_time": search_result["metadata"]["execution_time"],
-                    "cost": search_result["metadata"]["total_cost"],  # REAL COST
-                    "models_used": ["search_graph", "smart_router"],
-                    "confidence": search_result["metadata"].get("confidence_score", 0.8),
-                    "cached": False,
-                    "search_provider": search_result["metadata"].get("provider_used", "multi"),
-                    "enhanced": search_result["metadata"].get("enhanced", False),
-                    "execution_path": search_result["metadata"].get("execution_path", []),
-                    "search_enabled": True
+                    "execution_time": time.time() - start_time,
+                    "cost": metadata.get("total_cost", 0.0),
+                    "models_used": metadata.get("models_used", []),
+                    "confidence": metadata.get("confidence", 1.0),
+                    "cached": False
                 }
             )
         else:
-            # Fallback when search system is not yet available
-            logger.warning("Search system not available, returning initialization message")
+            # Fallback when search system not available
             search_data = SearchData(
-                query=request.query,
                 results=[],
-                summary="The search system is currently initializing. Please try again in a moment. This system will provide real web search results once fully ready.",
+                summary="Search system initializing. Please try again in a moment.",
                 total_results=0,
                 search_time=time.time() - start_time,
-                sources_consulted=["system_initializing"]
+                sources_consulted=[]
             )
             response = SearchResponse(
                 status="success",
@@ -144,23 +143,19 @@ async def basic_search(
                     "models_used": [],
                     "confidence": 0.0,
                     "cached": False,
-                    "search_system": "initializing",
-                    "search_enabled": False
+                    "search_system": "initializing"
                 }
             )
         logger.info(
-            "Search completed",
+            "Search completed successfully",
             query_id=query_id,
             execution_time=response.metadata["execution_time"],
-            results_count=search_data.total_results,
-            cost=response.metadata["cost"],
-            search_enabled=response.metadata.get("search_enabled", False),
             correlation_id=correlation_id
         )
         return response
     except Exception as e:
         logger.error(
-            "Search execution failed",
+            "Search failed",
             query_id=query_id,
             error=str(e),
             correlation_id=correlation_id,

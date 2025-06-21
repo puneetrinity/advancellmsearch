@@ -490,13 +490,16 @@ async def chat_stream(
                 }
             )
             
-            # Execute chat graph (non-streaming)
-            # TODO: Implement streaming at graph level
-            final_state = await chat_graph.execute(graph_state)
+            # Execute chat graph and PROPERLY AWAIT the result
+            chat_result = await chat_graph.execute(graph_state)
+
+            # Ensure we have the actual result, not a coroutine (double-await safety)
+            while asyncio.iscoroutine(chat_result):
+                chat_result = await chat_result
             
-            if final_state.final_response:
+            if chat_result.final_response:
                 # Simulate streaming by chunking the response
-                response_text = final_state.final_response
+                response_text = chat_result.final_response
                 chunk_size = max(1, len(response_text) // 20)  # ~20 chunks
                 
                 for i in range(0, len(response_text), chunk_size):
@@ -506,7 +509,7 @@ async def chat_stream(
                         "id": f"chatcmpl-{query_id}",
                         "object": "chat.completion.chunk",
                         "created": int(time.time()),
-                        "model": list(final_state.models_used)[0] if final_state.models_used else "local",
+                        "model": list(chat_result.models_used)[0] if chat_result.models_used else "local",
                         "choices": [{
                             "index": 0,
                             "delta": {"content": chunk},
@@ -522,7 +525,7 @@ async def chat_stream(
                     "id": f"chatcmpl-{query_id}",
                     "object": "chat.completion.chunk", 
                     "created": int(time.time()),
-                    "model": list(final_state.models_used)[0] if final_state.models_used else "local",
+                    "model": list(chat_result.models_used)[0] if chat_result.models_used else "local",
                     "choices": [{
                         "index": 0,
                         "delta": {},

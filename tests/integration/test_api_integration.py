@@ -73,26 +73,61 @@ def mock_app_components():
         "metadata": {"execution_time": 0.01, "total_cost": 0.0}
     })
 
-    # 🔥 DEBUG VERIFICATION
-    async def debug_mocks():
-        print("\n🔍 Testing search mock...")
-        search_result = await mock_search_system.execute_optimized_search(
-            query="test", budget=1.0, quality="standard", max_results=5
-        )
-        print(f"🔍 Search mock returns type: {type(search_result)}")
-        print(f"🔍 Search mock returns value: {search_result}")
-        print(f"🔍 Is coroutine? {asyncio.iscoroutine(search_result)}")
+    # 🔥 FIX: Properly configured search system mock
+    async def mock_search_execute(query, budget=2.0, quality="standard", max_results=10, **kwargs):
+        # Return the actual dict, not a coroutine
+        return {
+            "response": f"Test search response for: {query}",
+            "citations": [],
+            "metadata": {
+                "execution_time": 0.01, 
+                "total_cost": 0.0,
+                "query_id": "test-query-123"
+            }
+        }
+    mock_search_system.execute_optimized_search = mock_search_execute
 
-        print("\n💬 Testing chat mock...")
+    # 🔥 FIX: Properly configured chat graph mock  
+    async def mock_chat_execute(state_or_request, **kwargs):
+        # Return actual result object, not coroutine
+        result = Mock()
+        result.final_response = "Test chat response"
+        result.execution_time = 1.0
+        result.calculate_total_cost = Mock(return_value=0.01)
+        result.execution_path = ["test_node"]
+        result.conversation_history = []
+        result.sources_consulted = []
+        result.citations = []
+        result.warnings = []
+        result.costs_incurred = {}
+        result.models_used = set()
+        result.escalation_reason = None
+        result.errors = None
+        result.intermediate_results = {}
+        result.get_avg_confidence = Mock(return_value=1.0)
+        return result
+    mock_chat_graph.execute = mock_chat_execute
+
+    # 🔥 VERIFICATION: Test mocks work correctly
+    async def verify_mocks():
+        print("\n🔍 VERIFYING MOCKS:")
+        # Test search mock
+        search_result = await mock_search_system.execute_optimized_search("test query")
+        print(f"🔍 Search mock result type: {type(search_result)}")
+        print(f"🔍 Search mock is_coroutine: {asyncio.iscoroutine(search_result)}")
+        print(f"🔍 Search mock result: {search_result}")
+        # Test chat mock
         chat_result = await mock_chat_graph.execute(Mock())
-        print(f"💬 Chat mock returns type: {type(chat_result)}")
-        print(f"💬 Chat mock returns value: {chat_result}")
-        print(f"💬 Is coroutine? {asyncio.iscoroutine(chat_result)}")
-
+        print(f"🔍 Chat mock result type: {type(chat_result)}")
+        print(f"🔍 Chat mock is_coroutine: {asyncio.iscoroutine(chat_result)}")
+        # These should be False!
+        assert not asyncio.iscoroutine(search_result), "Search mock returning coroutine!"
+        assert not asyncio.iscoroutine(chat_result), "Chat mock returning coroutine!"
+        print("✅ Mock verification passed!")
     try:
-        asyncio.get_event_loop().run_until_complete(debug_mocks())
+        asyncio.get_event_loop().run_until_complete(verify_mocks())
     except RuntimeError:
-        asyncio.run(debug_mocks())
+        asyncio.run(verify_mocks())
 
     # Set FastAPI endpoint dependencies to use test mocks
     from app.api.chat import set_dependencies as set_chat_dependencies
