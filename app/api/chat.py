@@ -125,6 +125,7 @@ async def initialize_chat_dependencies():
 @log_performance("chat_complete")
 async def chat_complete(
     request: ChatRequest,
+    req: Request,
     background_tasks: BackgroundTasks,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -204,7 +205,10 @@ async def chat_complete(
         
         # Execute chat graph
         final_state = await chat_graph.execute(graph_state)
-        
+        logger.info(f"💬 Final state type: {type(final_state)}")
+        logger.info(f"💬 Final state value: {final_state}")
+        if hasattr(final_state, '__name__'):
+            logger.error(f"🚨 RETURNING FUNCTION: {final_state.__name__}")
         # Calculate metrics
         execution_time = time.time() - start_time
         total_cost = final_state.calculate_total_cost()
@@ -397,7 +401,8 @@ async def fallback_chat_response(request: ChatRequest) -> ChatResponse:
             "models_used": ["fallback"],
             "confidence": 0.0,
             "cached": False,
-            "timestamp": now
+            "timestamp": now,
+            "correlation_id": get_correlation_id()  # <-- Ensure this is always present
         },
         cost_prediction={
             "estimated_cost": 0.0,

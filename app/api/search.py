@@ -91,6 +91,10 @@ async def basic_search(
                 quality=request.quality,
                 max_results=request.max_results
             )
+            logger.info(f"🔍 Search result type: {type(search_result)}")
+            logger.info(f"🔍 Search result value: {search_result}")
+            if hasattr(search_result, '__name__'):
+                logger.error(f"🚨 RETURNING FUNCTION: {search_result.__name__}")
             # Convert real search results to API format
             real_results = _convert_search_citations_to_results(search_result.get("citations", []))
             search_data = SearchData(
@@ -513,3 +517,35 @@ async def basic_search_test(request: Dict[str, Any]):
     mock_user = {"user_id": "test_user", "tier": "free"}
     req = None  # If needed, pass a dummy or mock request object
     return await basic_search(search_request, req, mock_user)
+
+# Global dependency variables (for dependency injection)
+model_manager = None
+cache_manager = None
+search_graph = None
+
+async def initialize_search_dependencies():
+    """Initialize search API dependencies."""
+    global model_manager, cache_manager, search_graph
+    if model_manager is None:
+        import logging
+        logger = logging.getLogger("search")
+        logger.warning("Search dependencies not properly initialized")
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=503,
+            detail="Search service dependencies not initialized"
+        )
+
+def set_dependencies(
+    model_manager_instance,
+    cache_manager_instance=None,
+    search_graph_instance=None
+):
+    """Set dependencies for testing and runtime."""
+    global model_manager, cache_manager, search_graph
+    model_manager = model_manager_instance
+    cache_manager = cache_manager_instance
+    search_graph = search_graph_instance
+
+# Export router and dependency setter
+__all__ = ['router', 'set_dependencies']

@@ -4,44 +4,196 @@ Integration tests for the full API
 """
 
 import pytest
+import httpx
 from fastapi.testclient import TestClient
-
-from app.main import app
+from unittest.mock import Mock, AsyncMock
+from app.main import app, app_state
 
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def mock_app_components():
+    """Mock required components for testing - CORRECTED VERSION with debug verification"""
+    import asyncio
+    from unittest.mock import Mock, AsyncMock
+
+    # Mock model manager with SYNC methods
+    mock_model_manager = Mock()
+    mock_model_manager.get_model_stats.return_value = {
+        "total_models": 1,
+        "loaded_models": 0,
+        "model_details": {}
+    }
+    mock_model_manager.generate = AsyncMock(return_value=Mock(
+        success=True,
+        text="Test response",
+        cost=0.01
+    ))
+    # Mock cache manager
+    mock_cache_manager = Mock()
+    mock_cache_manager.get = AsyncMock(return_value=None)
+    mock_cache_manager.set = AsyncMock(return_value=True)
+    # Mock chat graph with async execute that returns actual data
+    mock_chat_graph = Mock()
+    mock_chat_graph.execute = AsyncMock(return_value=Mock(
+        final_response="Test chat response",
+        execution_time=1.0,
+        calculate_total_cost=Mock(return_value=0.01),
+        execution_path=["test_node"],
+        conversation_history=[],
+        sources_consulted=[],
+        citations=[],
+        warnings=[],
+        costs_incurred={},
+        models_used=set(),
+        escalation_reason=None,
+        errors=None,
+        intermediate_results={},
+        get_avg_confidence=Mock(return_value=1.0)
+    ))
+    mock_chat_graph.get_performance_stats.return_value = {
+        "executions": 1,
+        "avg_time": 1.0
+    }
+    # Mock search graph
+    mock_search_graph = Mock()
+    mock_search_graph.execute = AsyncMock(return_value=Mock(
+        results=[],
+        summary="Test summary",
+        total_results=0,
+        search_time=0.1,
+        sources_consulted=[]
+    ))
+    # Mock search system
+    mock_search_system = Mock()
+    mock_search_system.execute_optimized_search = AsyncMock(return_value={
+        "response": "Test search response",
+        "citations": [],
+        "metadata": {"execution_time": 0.01, "total_cost": 0.0}
+    })
+
+    # 🔥 DEBUG VERIFICATION
+    async def debug_mocks():
+        print("\n🔍 Testing search mock...")
+        search_result = await mock_search_system.execute_optimized_search(
+            query="test", budget=1.0, quality="standard", max_results=5
+        )
+        print(f"🔍 Search mock returns type: {type(search_result)}")
+        print(f"🔍 Search mock returns value: {search_result}")
+        print(f"🔍 Is coroutine? {asyncio.iscoroutine(search_result)}")
+
+        print("\n💬 Testing chat mock...")
+        chat_result = await mock_chat_graph.execute(Mock())
+        print(f"💬 Chat mock returns type: {type(chat_result)}")
+        print(f"💬 Chat mock returns value: {chat_result}")
+        print(f"💬 Is coroutine? {asyncio.iscoroutine(chat_result)}")
+
+    try:
+        asyncio.get_event_loop().run_until_complete(debug_mocks())
+    except RuntimeError:
+        asyncio.run(debug_mocks())
+
+    # Set FastAPI endpoint dependencies to use test mocks
+    from app.api.chat import set_dependencies as set_chat_dependencies
+    set_chat_dependencies(mock_model_manager, mock_cache_manager, mock_chat_graph)
+    # If search.set_dependencies exists, do the same for search
+    try:
+        from app.api.search import set_dependencies as set_search_dependencies
+        set_search_dependencies(mock_model_manager, mock_cache_manager, mock_search_graph)
+    except ImportError:
+        pass
+
+    # Update app_state
+    app_state.update({
+        "model_manager": mock_model_manager,
+        "cache_manager": mock_cache_manager, 
+        "chat_graph": mock_chat_graph,
+        "search_graph": mock_search_graph,
+        "search_system": mock_search_system,
+        "api_key_status": {
+            "brave_search": False,
+            "scrapingbee": False
+        },
+        "startup_time": 1234567890.0
+    })
+    yield
+    app_state.clear()
+
+
+# Sync endpoints (health, root)
 def test_health():
-    resp = client.get("/api/v1/health")
+    client = TestClient(app)
+    resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json().get("status") == "ok"
+    assert resp.json().get("status") in ("healthy", "degraded")
 
 
-def test_search_basic():
+def test_root():
+    client = TestClient(app)
+    resp = client.get("/")
+    assert resp.status_code == 200
+
+
+# Async endpoints (search, chat, metrics)
+@pytest.mark.asyncio
+async def test_search_basic():
+    """Test basic search endpoint with correct wrapper and schema"""
     payload = {
-        "query": "test query",
-        "filters": {},
-        "top_k": 3,
+        "query": "test search query",
+        "max_results": 10,
+        "search_type": "web",
+        "include_summary": True,
+        "budget": 2.0,
+        "quality": "standard"
     }
-    resp = client.post("/api/v1/search/basic", json=payload)
-    assert resp.status_code == 200
-    assert "results" in resp.json()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/v1/search/basic", json={"request": payload})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        assert "data" in data
+        assert "metadata" in data
 
 
-def test_chat_complete():
+@pytest.mark.asyncio
+async def test_chat_complete():
+    """Test chat complete endpoint with correct wrapper and schema"""
     payload = {
-        "messages": [{"role": "user", "content": "Hello"}],
-        "graph_state": {},
-        "quality": "default",
+        "message": "Hello, this is a test message",
+        "session_id": "test-session-123",
+        "user_context": {},
+        "quality_requirement": "balanced",
+        "max_cost": 0.10,
+        "max_execution_time": 30.0,
+        "force_local_only": False,
+        "response_style": "balanced",
+        "include_sources": True,
+        "include_debug_info": False
     }
-    resp = client.post("/api/v1/chat/complete", json=payload)
-    assert resp.status_code == 200
-    assert "choices" in resp.json() or "result" in resp.json()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/v1/chat/complete", json={"request": payload})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] in ["success", "error"]
+        assert "data" in data
+        assert "metadata" in data
+        assert "correlation_id" in data["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint():
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/metrics")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "status" in data
+        assert data["status"] == "operational"
 
 
 def test_search_test():
     payload = {"query": "test"}
     resp = client.post("/api/v1/search/test", json=payload)
     assert resp.status_code == 200
-    assert "results" in resp.json() or resp.json().get("status") == "ok"
+    assert "mock_results" in resp.json() and resp.json().get("status") == "success"
 

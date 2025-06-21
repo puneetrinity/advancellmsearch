@@ -4,10 +4,45 @@ Fixed integration tests that match the actual API endpoints and schemas
 
 import pytest
 from fastapi.testclient import TestClient
-from app.main import app  # Import your actual app
+from app.main import app, app_state  # Import your actual app
+from unittest.mock import Mock, AsyncMock
 
 # Create test client with the real app
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def mock_app_components(monkeypatch):
+    """Mock required components for testing"""
+    # Mock model manager
+    mock_model_manager = Mock()
+    mock_model_manager.get_model_stats.return_value = {"total_models": 1, "loaded_models": 1}
+    # Mock cache manager  
+    mock_cache_manager = Mock()
+    # Mock chat graph
+    mock_chat_graph = Mock()
+    mock_chat_graph.execute = AsyncMock(return_value=Mock(final_response="Test response", conversation_history=[], sources_consulted=[], citations=[], warnings=[], costs_incurred={}, models_used=set(), execution_path=[], escalation_reason=None, errors=None, intermediate_results={}, get_avg_confidence=lambda: 1.0, calculate_total_cost=lambda: 0.0))
+    # Mock search graph
+    mock_search_graph = Mock()
+    mock_search_graph.execute = AsyncMock(return_value=Mock())
+    # Mock search system
+    mock_search_system = Mock()
+    mock_search_system.execute_optimized_search = AsyncMock(return_value={
+        "response": "Test search response",
+        "citations": [],
+        "metadata": {"execution_time": 0.01, "total_cost": 0.0}
+    })
+    # Patch app_state
+    app_state.update({
+        "model_manager": mock_model_manager,
+        "cache_manager": mock_cache_manager, 
+        "chat_graph": mock_chat_graph,
+        "search_graph": mock_search_graph,
+        "search_system": mock_search_system
+    })
+    yield
+    # Cleanup
+    app_state.clear()
 
 
 def test_health():
@@ -75,8 +110,9 @@ def test_chat_corrected():
     assert resp.status_code in [200, 422], f"Got {resp.status_code}: {resp.text}"
     if resp.status_code == 200:
         data = resp.json()
-        assert "message" in data
-        print(f"✅ Chat passed: Response length {len(data['message'])}")
+        # The message is inside data['data']['response']
+        assert "data" in data and "response" in data["data"]
+        print(f"✅ Chat passed: Response length {len(data['data']['response'])}")
     else:
         data = resp.json()
         print(f"⚠️ Chat validation error: {data}")

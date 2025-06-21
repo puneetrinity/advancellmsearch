@@ -418,7 +418,7 @@ class OptimizedSearchSystem:
         self.search_router.search = optimized_router_search
         self.search_graph.execute = optimized_graph_execute
     
-    async def execute_optimized_search(self, query: str, **kwargs) -> Dict[str, Any]:
+    async def execute_optimized_search(self, query: str, budget: float = 2.0, quality: str = "balanced", max_results: int = 10, **kwargs) -> Dict[str, Any]:
         """Execute optimized search with full performance tracking"""
         
         async with self.optimizer.tracker.track_operation("complete_search_flow") as request_id:
@@ -440,7 +440,16 @@ class OptimizedSearchSystem:
                     }
                 )
                 
-                return result
+                # Ensure API-compatible output
+                return {
+                    "response": result.get("response", "No response generated"),
+                    "citations": result.get("citations", []),
+                    "metadata": result.get("metadata", {}),
+                    "performance_metrics": {
+                        "response_time": result.get("metadata", {}).get("total_cost", 0),
+                        "optimization_applied": True
+                    }
+                }
                 
             except Exception as e:
                 self.optimizer.tracker.finish_operation(

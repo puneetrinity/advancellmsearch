@@ -121,10 +121,30 @@ class InputSanitizer:
             text = str(text)
         
         # Length validation
-        InputSanitizer.validate_length(text, MAX_FIELD_LENGTH, field_name)
+        try:
+            InputSanitizer.validate_length(text, MAX_FIELD_LENGTH, field_name)
+        except SecurityViolation as e:
+            logger.debug(
+                "Length validation failed",
+                field=field_name,
+                value_preview=text[:100],
+                error=str(e),
+                correlation_id=get_correlation_id()
+            )
+            raise
         
         # SQL injection check
-        InputSanitizer.validate_sql_injection(text, field_name)
+        try:
+            InputSanitizer.validate_sql_injection(text, field_name)
+        except SecurityViolation as e:
+            logger.debug(
+                "SQL injection validation failed",
+                field=field_name,
+                value_preview=text[:100],
+                error=str(e),
+                correlation_id=get_correlation_id()
+            )
+            raise
         
         # XSS sanitization
         sanitized = InputSanitizer.sanitize_html(text)
@@ -203,6 +223,16 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         """Apply security validations."""
         start_time = time.time()
         
+        async def get_request_body():
+            try:
+                body = await request.body()
+                # Limit log size
+                if len(body) > 2048:
+                    return body[:2048] + b'... [truncated]'
+                return body
+            except Exception:
+                return b''
+        
         try:
             # Content length validation
             content_length = request.headers.get('content-length')
@@ -248,12 +278,20 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             return response
             
         except SecurityViolation as e:
+            # Enhanced debug logging
+            body = await get_request_body()
+            headers = dict(request.headers)
+            if 'authorization' in headers:
+                headers['authorization'] = '[REDACTED]'
             self.logger.warning(
                 "Security violation detected",
                 violation_type=e.violation_type,
                 details=e.details,
                 field=e.field,
                 path=request.url.path,
+                method=request.method,
+                headers=headers,
+                body=body.decode(errors='replace'),
                 correlation_id=get_correlation_id()
             )
             return self._create_error_response(
@@ -263,10 +301,18 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             )
         
         except Exception as e:
+            # Enhanced debug logging
+            body = await get_request_body()
+            headers = dict(request.headers)
+            if 'authorization' in headers:
+                headers['authorization'] = '[REDACTED]'
             self.logger.error(
                 "Security middleware error",
                 error=str(e),
                 path=request.url.path,
+                method=request.method,
+                headers=headers,
+                body=body.decode(errors='replace'),
                 correlation_id=get_correlation_id(),
                 exc_info=True
             )

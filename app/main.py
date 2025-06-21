@@ -31,6 +31,7 @@ from app.models.manager import ModelManager
 from app.cache.redis_client import CacheManager
 from app.graphs.chat_graph import ChatGraph
 from app.graphs.search_graph import SearchGraph
+from app.performance.optimization import OptimizedSearchSystem
 from app.schemas.responses import HealthStatus, create_error_response
 
 
@@ -38,6 +39,23 @@ from app.schemas.responses import HealthStatus, create_error_response
 app_state: Dict[str, Any] = {}
 settings = get_settings()
 logger = get_logger("main")
+
+
+from app.graphs.search_graph import execute_search
+
+class SearchSystemWrapper:
+    def __init__(self, model_manager, cache_manager):
+        self.model_manager = model_manager
+        self.cache_manager = cache_manager
+    async def search(self, query, budget=2.0, quality="balanced", max_results=10, **kwargs):
+        return await execute_search(
+            query=query,
+            model_manager=self.model_manager,
+            cache_manager=self.cache_manager,
+            budget=budget,
+            quality=quality,
+            max_results=max_results
+        )
 
 
 @asynccontextmanager
@@ -89,6 +107,16 @@ async def lifespan(app: FastAPI):
         app_state["search_graph"] = search_graph
         logger.info("✅ Search graph initialized")
         
+        # Initialize optimization system for search-augmented chat
+        logger.info("⚡ Initializing optimization system...")
+        search_router = SearchSystemWrapper(model_manager, app_state["cache_manager"])
+        search_system = OptimizedSearchSystem(
+            search_router=search_router,
+            search_graph=search_graph
+        )
+        app_state["search_system"] = search_system
+        logger.info("✅ Optimization system initialized")
+        
         # Validate provider configuration
         logger.info("🔑 Validating provider API keys...")
         api_key_status = {
@@ -113,8 +141,8 @@ async def lifespan(app: FastAPI):
             logger.warning("⚠️  ScrapingBee API key not found - content enhancement disabled")
         
         # Set dependencies for API modules
-        chat.set_dependencies(model_manager, app_state["cache_manager"], chat_graph)  # KEEP THIS
-        # search.set_dependencies(model_manager, app_state["cache_manager"], search_graph)  # COMMENTED OUT AS REQUESTED
+        chat.set_dependencies(model_manager, app_state["cache_manager"], chat_graph)
+        search.set_dependencies(model_manager, app_state["cache_manager"], search_graph)
         logger.info("✅ API dependencies configured")
         
         # Application startup complete
@@ -186,6 +214,19 @@ app.add_middleware(SecurityMiddleware, enable_rate_limiting=True)
 
 # Add logging middleware
 app.add_middleware(LoggingMiddleware)
+
+
+@app.middleware("http")
+async def app_state_middleware(request: Request, call_next):
+    """Ensure app.state has access to components."""
+    if hasattr(request.app, 'state'):
+        request.app.state.search_system = app_state.get("search_system")
+        request.app.state.model_manager = app_state.get("model_manager")
+        request.app.state.cache_manager = app_state.get("cache_manager")
+        request.app.state.chat_graph = app_state.get("chat_graph")
+        request.app.state.search_graph = app_state.get("search_graph")
+    response = await call_next(request)
+    return response
 
 
 # Performance monitoring middleware
@@ -281,6 +322,13 @@ async def health_check():
             components["search_graph"] = "healthy"
         else:
             components["search_graph"] = "not_initialized"
+            overall_healthy = False
+        
+        # Check optimization system
+        if "search_system" in app_state:
+            components["optimization_system"] = "healthy"
+        else:
+            components["optimization_system"] = "not_initialized"
             overall_healthy = False
         
         # Check provider API keys
@@ -393,38 +441,48 @@ async def system_status():
 
 @app.get("/metrics")
 async def get_metrics():
-    """Basic metrics endpoint for monitoring."""
+    """Basic metrics endpoint for monitoring with debug for circular/self-references."""
+    import json
     try:
         metrics = {
             "status": "operational",
             "timestamp": datetime.now().isoformat(),
         }
-        
-        # Get chat graph stats
-        if "chat_graph" in app_state:
-            try:
-                graph_stats = app_state["chat_graph"].get_performance_stats()
-                metrics["chat_graph"] = graph_stats
-            except Exception as e:
-                metrics["chat_graph"] = {"error": str(e)}
-        
-        # Get model stats
-        if "model_manager" in app_state:
-            try:
-                model_stats = app_state["model_manager"].get_model_stats()
-                metrics["models"] = model_stats
-            except Exception as e:
-                metrics["models"] = {"error": str(e)}
-        
+        # Debug: Model stats
+        model_stats = None
+        try:
+            model_stats = app_state["model_manager"].get_model_stats()
+            print("✅ Model stats OK")
+        except Exception as e:
+            print(f"❌ Model stats error: {e}")
+            model_stats = {"error": "model_stats_failed"}
+        try:
+            json.dumps(model_stats)
+            print("✅ Model stats JSON serializable")
+        except Exception as e:
+            print(f"❌ Model stats not serializable: {e}")
+        metrics["models"] = model_stats
+        # Debug: Chat graph stats
+        graph_stats = None
+        try:
+            graph_stats = app_state["chat_graph"].get_performance_stats()
+            print("✅ Graph stats OK")
+        except Exception as e:
+            print(f"❌ Graph stats error: {e}")
+            graph_stats = {"error": "graph_stats_failed"}
+        try:
+            json.dumps(graph_stats)
+            print("✅ Graph stats JSON serializable")
+        except Exception as e:
+            print(f"❌ Graph stats not serializable: {e}")
+        metrics["chat_graph"] = graph_stats
         # Add provider availability
         api_key_status = app_state.get("api_key_status", {})
         metrics["providers"] = {
             "brave_search_available": api_key_status.get("brave_search", False),
             "scrapingbee_available": api_key_status.get("scrapingbee", False)
         }
-        
         return metrics
-        
     except Exception as e:
         logger.error("Metrics collection failed", error=str(e))
         raise HTTPException(status_code=500, detail="Metrics collection failed")
