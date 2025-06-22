@@ -6,7 +6,7 @@ import html
 import re
 import time
 from typing import Any, Dict, List, Optional, Set
-from fastapi import HTTPException, Request, Response
+from fastapi import HTTPException, Request, Response, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field, field_validator
@@ -415,11 +415,10 @@ security = HTTPBearer(auto_error=False)
 
 async def get_current_user(
     request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = None
+    credentials: HTTPAuthorizationCredentials = Depends(security)
 ) -> Dict[str, Any]:
     """Get current user from token or create anonymous user."""
     correlation_id = get_correlation_id()
-    
     if credentials and credentials.credentials:
         # Try to authenticate with token
         user = auth_stub.authenticate_token(credentials.credentials)
@@ -440,18 +439,15 @@ async def get_current_user(
                 status_code=401,
                 detail="Invalid authentication token"
             )
-    
     # Create anonymous user
     client_ip = request.client.host if request.client else "unknown"
     anonymous_user = auth_stub.create_anonymous_user(client_ip)
-    
     logger.debug(
         "Anonymous user created",
         user_id=anonymous_user["user_id"],
         client_ip=client_ip,
         correlation_id=correlation_id
     )
-    
     return anonymous_user
 
 
@@ -540,10 +536,7 @@ class SecureTextInput(BaseModel):
     # Optional authentication fields (handled by middleware)
     scheme: Optional[str] = Field(None, description="Authentication scheme (auto-filled)")
     credentials: Optional[str] = Field(None, description="Authentication credentials (auto-filled)")
-    
 
-    """Base model with security validation for text inputs."""
-    
     @field_validator('*', mode='before')
     @classmethod
     def validate_and_sanitize_strings(cls, v, info):

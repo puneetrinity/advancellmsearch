@@ -103,7 +103,7 @@ def test_chat_corrected():
             "quality_requirement": "standard"
         }
     }
-    resp = client.post("/api/v1/chat/complete", json=payload)
+    resp = client.post("/api/v1/chat/chat", json=payload)
     if resp.status_code == 500:
         print(f"❌ Unexpected server error: {resp.text}")
         pytest.fail(f"Server error (500): {resp.text}")
@@ -161,7 +161,7 @@ async def test_chat_streaming():
         "constraints": {"max_cost": 1.0},
         "stream": True
     }
-    resp = client.post("/api/v1/chat/complete", json=payload)
+    resp = client.post("/api/v1/chat/chat", json=payload)
     if resp.status_code == 500:
         print("⚠️ Streaming may not be fully implemented yet")
         pytest.skip("Streaming appears to have implementation issues")
@@ -181,7 +181,7 @@ def test_error_handling():
         "context": {},
         "constraints": {}
     }
-    resp = client.post("/api/v1/chat/complete", json=payload)
+    resp = client.post("/api/v1/chat/chat", json=payload)
     assert resp.status_code == 422, f"Expected 422, got {resp.status_code}: {resp.text}"
     print("✅ Error handling passed: Empty message properly rejected")
 

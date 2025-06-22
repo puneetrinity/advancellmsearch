@@ -45,18 +45,19 @@ async def initialize_chat_dependencies():
     if not model_manager:
         model_manager = ModelManager()
         await model_manager.initialize()
-        logger.info("ModelManager initialized for chat API")
+        # Remove diagnostic logs for production
+        # logger.info("ModelManager initialized for chat API")
     if not cache_manager:
         try:
             cache_manager = CacheManager(settings.redis_url)
             await cache_manager.initialize()
-            logger.info("CacheManager initialized for chat API")
+            # logger.info("CacheManager initialized for chat API")
         except Exception as e:
-            logger.warning(f"CacheManager initialization failed: {e}")
+            # logger.warning(f"CacheManager initialization failed: {e}")
             cache_manager = None
     if not chat_graph:
         chat_graph = ChatGraph(model_manager, cache_manager)
-        logger.info("ChatGraph initialized for chat API")
+        # logger.info("ChatGraph initialized for chat API")
 
 @router.get("/health")
 async def chat_health():
@@ -71,18 +72,12 @@ async def chat_health():
 # CORRECTED MAIN ENDPOINT WITH COROUTINE SAFETY AND ADVANCED LOGIC
 @router.post("/complete", response_model=ChatResponse)
 @log_performance("chat_complete")
-@coroutine_safe(timeout=60.0)
 async def chat_complete(
-    req: Request,
-    background_tasks: BackgroundTasks,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    chat_request: ChatRequest = Body(..., embed=False),
+    current_user: dict = Depends(get_current_user),
+    background_tasks: BackgroundTasks = None,
+    request: Request = None
 ):
-    # Parse request body manually to avoid FastAPI wrapper
-    try:
-        data = await req.json()
-        chat_request = ChatRequest(**data)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Invalid request body: {str(e)}")
     query_id = str(uuid.uuid4())
     correlation_id = get_correlation_id()
     start_time = time.time()
@@ -98,15 +93,10 @@ async def chat_complete(
         # Content policy check
         policy_check = check_content_policy(chat_request.message)
         if not policy_check["passed"]:
-            raise HTTPException(
-                status_code=400,
-                detail=create_error_response(
-                    message="Content violates policy",
-                    error_code="CONTENT_POLICY_VIOLATION",
-                    query_id=query_id,
-                    correlation_id=correlation_id,
-                    suggestions=["Please rephrase your request", "Avoid prohibited content"]
-                ).dict()
+            return create_error_response(
+                message="Message violates content policy.",
+                error_code="CONTENT_POLICY_VIOLATION",
+                correlation_id=correlation_id
             )
         session_id = chat_request.session_id or f"chat_{current_user['user_id']}_{int(time.time())}"
         conversation_history = chat_request.user_context.get("conversation_history", [])
@@ -127,8 +117,12 @@ async def chat_complete(
                 "force_local_only": chat_request.force_local_only
             }
         )
+        # Retrieve chat_graph from app state
+        chat_graph_instance = getattr(request.app.state, "chat_graph", None)
+        if chat_graph_instance is None:
+            raise RuntimeError("Chat graph is not initialized.")
         chat_result = await safe_graph_execute(
-            chat_graph, 
+            chat_graph_instance, 
             graph_state, 
             timeout=chat_request.max_execution_time
         )
@@ -136,12 +130,18 @@ async def chat_complete(
         if not hasattr(chat_result, 'final_response'):
             logger.error(f"Chat result missing final_response: {type(chat_result)}")
             raise ValueError("Invalid chat result structure")
+        # Ensure conversation_summary is a string or None
+        raw_summary = getattr(chat_result, 'conversation_summary', None)
+        if raw_summary is not None and not isinstance(raw_summary, str):
+            conversation_summary = str(raw_summary)
+        else:
+            conversation_summary = raw_summary
         conversation_context = ConversationContext(
             session_id=session_id,
             message_count=len(conversation_history) + 1,
             last_updated=datetime.utcnow().isoformat(),
             user_preferences=chat_request.user_context,
-            conversation_summary=getattr(chat_result, 'conversation_summary', None)
+            conversation_summary=conversation_summary
         )
         chat_data = ChatData(
             response=chat_result.final_response,
@@ -160,6 +160,7 @@ async def chat_complete(
         execution_time = time.time() - start_time
         metadata = ResponseMetadata(
             query_id=query_id,
+            correlation_id=correlation_id,  # Ensure this is always set
             execution_time=execution_time,
             cost=total_cost,
             models_used=list(getattr(chat_result, 'models_used', set())),
@@ -246,6 +247,12 @@ async def chat_complete(
             ).dict()
         )
 
+
+def _unwrap_request(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Unwrap request payload if it's wrapped in 'request' key"""
+    if "request" in data and isinstance(data["request"], dict):
+        return data["request"]
+    return data
 # CORRECTED STREAMING ENDPOINT WITH COROUTINE SAFETY
 @router.post("/stream")
 @coroutine_safe(timeout=120.0)
@@ -263,8 +270,14 @@ async def chat_stream(
         try:
             user_message = ""
             for msg in reversed(streaming_request.messages):
-                if msg["role"] == "user":
-                    user_message = msg["content"]
+                if isinstance(msg, dict):
+                    role = msg.get("role", None)
+                    content = msg.get("content", "")
+                else:
+                    role = getattr(msg, "role", None)
+                    content = getattr(msg, "content", "")
+                if role == "user":
+                    user_message = content
                     break
             policy_check = check_content_policy(user_message)
             if not policy_check["passed"]:
@@ -273,9 +286,15 @@ async def chat_stream(
             session_id = streaming_request.session_id or f"stream_{current_user['user_id']}_{int(time.time())}"
             conversation_history = []
             for msg in streaming_request.messages[:-1]:
+                if isinstance(msg, dict):
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                else:
+                    role = getattr(msg, "role", "unknown")
+                    content = getattr(msg, "content", "")
                 conversation_history.append({
-                    "role": msg["role"],
-                    "content": msg["content"],
+                    "role": role,
+                    "content": content,
                     "timestamp": time.time()
                 })
             graph_state = GraphState(

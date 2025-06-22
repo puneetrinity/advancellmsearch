@@ -6,7 +6,6 @@ Pydantic models for request validation
 
 from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field, field_validator
-from app.api.security import SecureTextInput
 
 
 class Constraints(BaseModel):
@@ -111,14 +110,14 @@ class SearchRequest(BaseModel):
     budget: Optional[float] = Field(2.0, ge=0.1, le=10.0, description="Search budget in rupees")
     quality: Optional[str] = Field("standard", description="Search quality: basic, standard, premium")
     session_id: Optional[str] = Field(None, description="Session ID")
-    
+
     @field_validator('search_type')
     def validate_search_type(cls, v):
         allowed = ["web", "academic", "news"]
         if v not in allowed:
             raise ValueError(f"Search type must be one of: {allowed}")
         return v
-    
+
     @field_validator('quality')
     def validate_quality(cls, v):
         allowed = ["basic", "standard", "premium"]

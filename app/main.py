@@ -639,16 +639,16 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 # Include API routers
 app.include_router(
-    chat.router,
-    prefix="/api/v1/chat",
-    tags=["Chat"],
+    search.router,
+    prefix="/api/v1/search",
+    tags=["Search"],
     dependencies=[]
 )
 
 app.include_router(
-    search.router,
-    prefix="/api/v1/search",
-    tags=["Search"],
+    chat.router,
+    prefix="/api/v1/chat",
+    tags=["Chat"],
     dependencies=[]
 )
 
@@ -668,8 +668,6 @@ async def root():
         "docs_url": "/docs" if settings.environment != "production" else None,
         "health_url": "/health",
         "api_endpoints": {
-            "chat": "/api/v1/chat/complete",
-            "chat_stream": "/api/v1/chat/stream",
             "search_basic": "/api/v1/search/basic",
             "search_advanced": "/api/v1/search/advanced",
             "health": "/health",

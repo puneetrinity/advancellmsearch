@@ -241,7 +241,8 @@ def log_performance(operation_name: str):
     """Decorator for automatic performance logging - FastAPI compatible."""
     def decorator(func):
         import functools
-        if hasattr(func, '__await__'):  # async function
+        import asyncio
+        if asyncio.iscoroutinefunction(func):  # async function
             @functools.wraps(func)
             async def async_wrapper(*args, **kwargs):
                 import time

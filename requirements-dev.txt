@@ -1,7 +1,5 @@
 # requirements-dev.txt
-"""
-Development dependencies
-"""
+# Development dependencies
 
 -r requirements.txt
 
@@ -20,5 +18,3 @@ isort==5.12.0
 # Development tools
 pre-commit==3.5.0
 jupyter==1.0.0
-
----

@@ -16,9 +16,7 @@ from app.graphs.base import (
 from app.models.manager import ModelManager, TaskType, QualityLevel
 from app.models.ollama_client import ModelResult
 from app.core.logging import get_logger
-
-# Import LangGraph constants
-from langgraph.graph import START, END
+from langgraph.constants import START, END
 
 logger = get_logger("graphs.chat")
 
@@ -50,7 +48,7 @@ class ContextManagerNode(BaseGraphNode):
         self.cache_manager = cache_manager
     
     async def execute(self, state: GraphState, **kwargs) -> NodeResult:
-        """Analyze and update conversation context."""
+        logger.debug(f"[ContextManagerNode] Enter execute. state.query_id={getattr(state, 'query_id', None)}")
         try:
             # Create conversation context
             context = ConversationContext()
@@ -68,6 +66,7 @@ class ContextManagerNode(BaseGraphNode):
             # Store context in state
             state.intermediate_results["conversation_context"] = context.__dict__
             
+            logger.debug(f"[ContextManagerNode] Success. state.query_id={getattr(state, 'query_id', None)}")
             return NodeResult(
                 success=True,
                 data={"context": context.__dict__},
@@ -76,6 +75,7 @@ class ContextManagerNode(BaseGraphNode):
             )
             
         except Exception as e:
+            logger.error(f"[ContextManagerNode] Error: {e}")
             return NodeResult(
                 success=False,
                 error=f"Context management failed: {str(e)}",
@@ -130,7 +130,7 @@ class IntentClassifierNode(BaseGraphNode):
         self.model_manager = model_manager
     
     async def execute(self, state: GraphState, **kwargs) -> NodeResult:
-        """Classify user intent and set query complexity."""
+        logger.debug(f"[IntentClassifierNode] Enter execute. state.query_id={getattr(state, 'query_id', None)}")
         try:
             query = state.processed_query or state.original_query
             model_name = self.model_manager.select_optimal_model(
@@ -161,6 +161,7 @@ class IntentClassifierNode(BaseGraphNode):
             complexity = self._calculate_complexity(query)
             state.query_intent = intent
             state.query_complexity = complexity
+            logger.debug(f"[IntentClassifierNode] Success. state.query_id={getattr(state, 'query_id', None)}")
             return NodeResult(
                 success=True,
                 data={
@@ -172,6 +173,7 @@ class IntentClassifierNode(BaseGraphNode):
                 execution_time=0.05
             )
         except Exception as e:
+            logger.error(f"[IntentClassifierNode] Error: {e}")
             return NodeResult(
                 success=False,
                 error=f"Intent classification failed: {str(e)}",
@@ -217,7 +219,7 @@ class ResponseGeneratorNode(BaseGraphNode):
         self.model_manager = model_manager
     
     async def execute(self, state: GraphState, **kwargs) -> NodeResult:
-        """Generate response with timeout protection."""
+        logger.debug(f"[ResponseGeneratorNode] Enter execute. state.query_id={getattr(state, 'query_id', None)}")
         try:
             model_name = self._select_model(state)
             prompt = self._build_prompt(state)
@@ -243,6 +245,7 @@ class ResponseGeneratorNode(BaseGraphNode):
             if result.success:
                 response = self._post_process_response(result.text, state)
                 state.final_response = response
+                logger.debug(f"[ResponseGeneratorNode] Success. state.query_id={getattr(state, 'query_id', None)}")
                 return NodeResult(
                     success=True,
                     data={"response": response},
@@ -254,6 +257,7 @@ class ResponseGeneratorNode(BaseGraphNode):
             else:
                 fallback_response = "I'm having trouble generating a response right now."
                 state.final_response = fallback_response
+                logger.warning(f"[ResponseGeneratorNode] Model generation failed: {result.error}")
                 return NodeResult(
                     success=False,
                     data={"response": fallback_response},
@@ -264,6 +268,7 @@ class ResponseGeneratorNode(BaseGraphNode):
         except Exception as e:
             fallback_response = "I encountered an error. Please try again."
             state.final_response = fallback_response
+            logger.error(f"[ResponseGeneratorNode] Error: {e}")
             return NodeResult(
                 success=False,
                 data={"response": fallback_response},
@@ -295,8 +300,13 @@ class ResponseGeneratorNode(BaseGraphNode):
         if state.conversation_history:
             prompt_parts.append("\nConversation history:")
             for msg in state.conversation_history[-3:]:  # Last 3 exchanges
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")
+                if isinstance(msg, dict):
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                else:
+                    # Assume ChatMessage object or similar
+                    role = getattr(msg, "role", "unknown")
+                    content = getattr(msg, "content", "")
                 prompt_parts.append(f"{role.title()}: {content}")
         
         # Add style preferences
@@ -376,6 +386,7 @@ class CacheUpdateNode(BaseGraphNode):
         self.cache_manager = cache_manager
     
     async def execute(self, state: GraphState, **kwargs) -> NodeResult:
+        logger.debug(f"[CacheUpdateNode] Enter execute. state.query_id={getattr(state, 'query_id', None)}")
         try:
             updates_made = []
             
@@ -430,6 +441,7 @@ class CacheUpdateNode(BaseGraphNode):
                     )
                     updates_made.append("user_preferences")
             
+            logger.debug(f"[CacheUpdateNode] Success. state.query_id={getattr(state, 'query_id', None)}")
             return NodeResult(
                 success=True,
                 data={
@@ -441,6 +453,7 @@ class CacheUpdateNode(BaseGraphNode):
             )
             
         except Exception as e:
+            logger.error(f"[CacheUpdateNode] Error: {e}")
             return NodeResult(
                 success=True,  # Non-critical failure
                 data={"updates_made": []},
@@ -458,12 +471,13 @@ class ErrorHandlerNode(BaseGraphNode):
         self.max_executions = 3  # Prevent infinite loops
 
     async def execute(self, state: GraphState, **kwargs) -> NodeResult:
-        """Handle errors with circuit breaker."""
+        logger.debug(f"[ErrorHandlerNode] Enter execute. state.query_id={getattr(state, 'query_id', None)}")
         try:
             error_handler_count = state.execution_path.count("error_handler")
             if error_handler_count >= self.max_executions:
                 if not state.final_response:
                     state.final_response = "I'm experiencing technical difficulties. Please try again later."
+                logger.warning(f"[ErrorHandlerNode] Circuit breaker triggered. count={error_handler_count}")
                 return NodeResult(
                     success=True,
                     data={"errors_handled": len(state.errors), "circuit_breaker_triggered": True},
@@ -477,6 +491,7 @@ class ErrorHandlerNode(BaseGraphNode):
                 )
             if len(state.errors) > 5:
                 state.errors = state.errors[-3:]
+            logger.debug(f"[ErrorHandlerNode] Success. state.query_id={getattr(state, 'query_id', None)}")
             return NodeResult(
                 success=True,
                 data={"errors_handled": len(state.errors)},
@@ -484,6 +499,7 @@ class ErrorHandlerNode(BaseGraphNode):
                 execution_time=0.01
             )
         except Exception as e:
+            logger.error(f"[ErrorHandlerNode] Error: {e}")
             if not state.final_response:
                 state.final_response = "Technical error occurred. Please try again."
             return NodeResult(
@@ -583,11 +599,13 @@ class ChatGraph(BaseGraph):
         super().build()
     
     async def execute(self, state: GraphState) -> GraphState:
+        logger.debug(f"[ChatGraph] Enter execute. state.query_id={getattr(state, 'query_id', None)}")
         import time
         start_time = time.time()
         self.execution_stats["total_executions"] += 1
         try:
             result = await super().execute(state)
+            logger.debug(f"[ChatGraph] Success. state.query_id={getattr(state, 'query_id', None)}")
             if len(result.errors) <= 2:
                 self.execution_stats["successful_executions"] += 1
             for node_name in result.execution_path:
@@ -608,6 +626,7 @@ class ChatGraph(BaseGraph):
             self.execution_stats["total_execution_time"] += execution_time
             return result
         except Exception as e:
+            logger.error(f"[ChatGraph] Error: {e}")
             execution_time = time.time() - start_time
             self.execution_stats["total_execution_time"] += execution_time
             state.errors.append(f"Graph execution failed: {str(e)}")

@@ -184,8 +184,6 @@ async def test_search_basic():
     }
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post("/api/v1/search/basic", json=payload)
-        if resp.status_code != 200:
-            print("\n--- 422 Error Details ---\n", resp.text)
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "success"
@@ -210,8 +208,6 @@ async def test_chat_complete():
     }
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post("/api/v1/chat/complete", json=payload)
-        if resp.status_code != 200:
-            print("\n--- 422 Error Details ---\n", resp.text)
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] in ["success", "error"]

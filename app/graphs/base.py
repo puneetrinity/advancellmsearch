@@ -12,10 +12,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import structlog
-from langgraph.graph import StateGraph, START, END
+from langgraph.constants import START, END
+from langgraph.graph import StateGraph
 from pydantic import BaseModel
 
 logger = structlog.get_logger(__name__)
+
+# Define local START and END constants for graph entry/exit
+# START = "START"
+# END = "END"
 
 
 class GraphType(Enum):
