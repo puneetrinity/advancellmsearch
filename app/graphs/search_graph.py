@@ -77,88 +77,101 @@ class SmartSearchRouterNode(BaseGraphNode):
             query = state.original_query
             budget = state.cost_budget_remaining
             quality = state.quality_requirement
-            
-            # Analyze query to determine search strategy
-            search_strategy = self._determine_search_strategy(query, budget, quality)
-            
-            # Store strategy in state
-            state.intermediate_results["search_strategy"] = search_strategy
-            
-            # Determine next nodes based on strategy
-            if search_strategy["skip_search"]:
-                next_nodes = ["direct_response"]
-            else:
-                next_nodes = ["brave_search"]
-            
+            # Analyze query characteristics
+            query_analysis = self._analyze_query(query)
+            # Determine routing strategy based on budget and quality
+            strategy = self._determine_strategy(budget, quality, query_analysis)
+            # Store strategy in state for other nodes
+            state.intermediate_results["search_strategy"] = strategy
+            logger.info(
+                "Search routing decision",
+                query=query[:100],
+                budget=budget,
+                quality=quality,
+                strategy=strategy["route"],
+                estimated_cost=strategy["estimated_cost"]
+            )
             return NodeResult(
                 success=True,
-                confidence=0.9,
                 data={
-                    "strategy": search_strategy,
-                    "estimated_cost": search_strategy["estimated_cost"],
-                    "route_decision": search_strategy["route"]
+                    "routing_decision": strategy["route"],
+                    "use_brave": strategy["use_brave"],
+                    "use_scraping": strategy["use_scraping"],
+                    "estimated_cost": strategy["estimated_cost"],
+                    "query_complexity": query_analysis["complexity"],
+                    "reasoning": strategy["reason"]
                 },
-                cost=0.0,
-                next_nodes=next_nodes
+                confidence=0.9,
+                execution_time=0.02,
+                cost=0.0
             )
-            
         except Exception as e:
+            logger.error(f"Search routing failed: {e}")
             return NodeResult(
                 success=False,
-                error=f"Router failed: {str(e)}",
-                confidence=0.0
+                error=f"Search routing failed: {str(e)}",
+                confidence=0.0,
+                execution_time=0.02
             )
-    
-    def _determine_search_strategy(self, query: str, budget: float, quality: str) -> Dict[str, Any]:
-        """Determine optimal search strategy"""
+
+    def _analyze_query(self, query: str) -> dict:
+        """Analyze query characteristics"""
+        analysis = {
+            "complexity": 0.5,
+            "requires_fresh_content": False,
+            "requires_deep_content": False,
+            "query_type": "general"
+        }
         query_lower = query.lower()
-        
-        # Check if search is needed
-        no_search_patterns = [
-            "hello", "hi", "thanks", "thank you", 
-            "help me code", "explain", "define", "calculate"
-        ]
-        
-        if any(pattern in query_lower for pattern in no_search_patterns):
-            return {
-                "route": "direct",
-                "skip_search": True,
-                "use_brave": False,
-                "use_scraping": False,
-                "estimated_cost": 0.0,
-                "reason": "Direct response sufficient"
-            }
-        
-        # Determine search route based on budget and quality
-        if quality == "premium" and budget >= 1.50:
-            return {
-                "route": "premium",
-                "skip_search": False,
-                "use_brave": True,
+        complex_indicators = ["analyze", "compare", "research", "comprehensive", "detailed"]
+        if any(indicator in query_lower for indicator in complex_indicators):
+            analysis["complexity"] = 0.8
+            analysis["requires_deep_content"] = True
+        fresh_indicators = ["recent", "latest", "current", "today", "news", "2024", "2025"]
+        if any(indicator in query_lower for indicator in fresh_indicators):
+            analysis["requires_fresh_content"] = True
+        if any(word in query_lower for word in ["how to", "tutorial", "guide"]):
+            analysis["query_type"] = "instructional"
+        elif any(word in query_lower for word in ["what is", "define", "meaning"]):
+            analysis["query_type"] = "definitional"
+        elif any(word in query_lower for word in ["compare", "vs", "difference"]):
+            analysis["query_type"] = "comparative"
+        return analysis
+
+    def _determine_strategy(self, budget: float, quality: str, query_analysis: dict) -> dict:
+        """Determine search strategy based on constraints"""
+        BRAVE_COST = 0.42
+        SCRAPING_COST = 0.84
+        strategy = {
+            "route": "search",
+            "use_brave": True,
+            "use_scraping": False,
+            "max_scrape": 0,
+            "estimated_cost": BRAVE_COST,
+            "reason": "Standard search"
+        }
+        if quality == "premium" and budget >= (BRAVE_COST + SCRAPING_COST):
+            strategy.update({
                 "use_scraping": True,
                 "max_scrape": 3,
-                "estimated_cost": 0.426,  # 0.42 + (3 * 0.002)
+                "estimated_cost": BRAVE_COST + (3 * SCRAPING_COST),
                 "reason": "Premium quality with content enhancement"
-            }
-        elif budget >= 0.50:
-            return {
-                "route": "standard",
-                "skip_search": False,
-                "use_brave": True,
-                "use_scraping": False,
-                "max_scrape": 0,
-                "estimated_cost": 0.42,
-                "reason": "Standard Brave search only"
-            }
-        else:
-            return {
-                "route": "fallback",
-                "skip_search": False,
+            })
+        elif query_analysis["complexity"] > 0.7 and budget >= (BRAVE_COST + SCRAPING_COST):
+            strategy.update({
+                "use_scraping": True,
+                "max_scrape": 2,
+                "estimated_cost": BRAVE_COST + (2 * SCRAPING_COST),
+                "reason": "Complex query requiring enhanced content"
+            })
+        elif budget < BRAVE_COST:
+            strategy.update({
+                "route": "direct",
                 "use_brave": False,
-                "use_scraping": False,
                 "estimated_cost": 0.0,
-                "reason": "Budget-constrained fallback"
-            }
+                "reason": "Budget-constrained, using direct response"
+            })
+        return strategy
 
 
 class BraveSearchNode(BaseGraphNode):

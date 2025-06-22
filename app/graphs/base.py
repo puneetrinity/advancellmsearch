@@ -12,9 +12,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import structlog
-from langgraph.constants import START, END
 from langgraph.graph import StateGraph
 from pydantic import BaseModel
+
+# Define local START and END constants for graph entry/exit
+START = "start"
+END = "end"
 
 logger = structlog.get_logger(__name__)
 
@@ -220,7 +223,7 @@ class BaseGraph(ABC):
         pass
 
     def build(self):
-        """Build the LangGraph instance with proper START/END handling"""
+        """Build the LangGraph instance with explicit entrypoint handling."""
         try:
             # Define nodes
             self.nodes = self.define_nodes()
@@ -229,21 +232,21 @@ class BaseGraph(ABC):
             # Add nodes to graph
             for node_name, node_instance in self.nodes.items():
                 self.graph.add_node(node_name, node_instance)
-            # Add edges with proper START/END handling
+            # Add edges and track START target
             edges = self.define_edges()
+            start_target = None
             for edge in edges:
                 if len(edge) == 2:
                     from_node, to_node = edge
-                    if to_node == END or to_node == "END":
-                        self.graph.add_edge(from_node, END)
-                    elif from_node == START or from_node == "START":
+                    if from_node == START or from_node == "START":
+                        start_target = to_node
                         self.graph.add_edge(START, to_node)
+                    elif to_node == END or to_node == "END":
+                        self.graph.add_edge(from_node, END)
                     else:
                         self.graph.add_edge(from_node, to_node)
                 elif len(edge) == 3:
-                    # Conditional edge
                     from_node, condition_func, mapping = edge
-                    # Update mapping to handle END constant
                     updated_mapping = {}
                     for condition, target in mapping.items():
                         if target == "END" or target == END:
@@ -255,12 +258,49 @@ class BaseGraph(ABC):
                         condition_func,
                         updated_mapping
                     )
-            # Compile graph (entry point auto-set when using START)
+            # Register 'end' as a terminal node for LangGraph compatibility
+            try:
+                if hasattr(self.graph, 'add_terminal_node'):
+                    self.graph.add_terminal_node(END)
+                    self.logger.debug("Added terminal node using add_terminal_node()")
+                elif hasattr(self.graph, 'set_terminal_nodes'):
+                    self.graph.set_terminal_nodes([END])
+                    self.logger.debug("Added terminal node using set_terminal_nodes()")
+                elif hasattr(self.graph, 'set_finish_point'):
+                    self.graph.set_finish_point(END)
+                    self.logger.debug("Added terminal node using set_finish_point()")
+                else:
+                    self.logger.warning(
+                        "No terminal node registration method found. "
+                        "This may cause graph execution issues.")
+            except Exception as terminal_error:
+                self.logger.warning(
+                    "Failed to register terminal node",
+                    error=str(terminal_error),
+                    exc_info=terminal_error
+                )
+            # Set 'start' as the entry point for LangGraph compatibility
+            try:
+                if hasattr(self.graph, 'set_entry_point'):
+                    self.graph.set_entry_point(START)
+                    self.logger.debug("Set entry point using set_entry_point()")
+                else:
+                    self.logger.warning(
+                        "No entry point registration method found. "
+                        "This may cause graph execution issues.")
+            except Exception as entry_error:
+                self.logger.warning(
+                    "Failed to register entry point",
+                    error=str(entry_error),
+                    exc_info=entry_error
+                )
+            # Compile graph
             self.graph = self.graph.compile()
             self.logger.info(
                 "Graph built successfully",
                 graph_type=self.graph_type.value,
-                nodes=list(self.nodes.keys())
+                nodes=list(self.nodes.keys()),
+                entrypoint=start_target
             )
         except Exception as e:
             self.logger.error(

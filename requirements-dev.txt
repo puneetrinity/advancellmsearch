@@ -5,9 +5,10 @@
 
 # Testing
 pytest==7.4.3
-pytest-asyncio==0.21.1
+pytest-asyncio
 pytest-cov==4.1.0
 httpx==0.25.2
+asgi_lifespan
 
 # Code quality
 black==23.11.0

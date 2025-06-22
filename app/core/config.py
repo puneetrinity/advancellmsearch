@@ -8,6 +8,7 @@ from functools import lru_cache
 from typing import List, Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field
+import os
 
 
 class Settings(BaseSettings):
@@ -30,7 +31,7 @@ class Settings(BaseSettings):
     allowed_origins: List[str] = ["http://localhost:3000", "http://localhost:8000"]
     
     # Ollama Configuration
-    ollama_host: str = "http://localhost:11434"
+    ollama_host: str = Field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://ollama:11434"))
     ollama_timeout: int = 60
     ollama_max_retries: int = 3
     

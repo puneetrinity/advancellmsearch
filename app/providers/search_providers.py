@@ -181,55 +181,90 @@ class ScrapingBeeProvider(BaseSearchProvider):
         
     async def enhance_result(self, result: SearchResult) -> SearchResult:
         """Enhance a search result with full content scraping"""
-        start_time = time.time()
-        
-        params = {
-            "api_key": self.api_key,
-            "url": result.url,
-            "render_js": "false",  # Faster scraping
-            "premium_proxy": "true",  # Better success rate
-            "country_code": "us",
-            "extract_rules": json.dumps({
-                "title": "title",
-                "content": "p",
-                "headings": "h1,h2,h3"
-            })
-        }
-        
         try:
-            async with self.session.get(
-                self.base_url,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as response:
-                
-                if response.status == 200:
-                    content = await response.text()
-                    
-                    # Extract meaningful content (simplified)
-                    enhanced_content = self._extract_content(content)
-                    
-                    result.enhanced_content = enhanced_content
-                    result.scraped_at = time.time()
-                    result.cost += self.cost_per_query
-                    result.confidence_score = min(result.confidence_score + 0.2, 1.0)
-                    
-                    logger.info(f"Enhanced content for {result.url} ({len(enhanced_content)} chars)")
-                    
-                else:
-                    logger.warning(f"ScrapingBee failed for {result.url}: {response.status}")
-                    
+            import aiohttp
+            import json
+            from bs4 import BeautifulSoup
+            params = {
+                "api_key": self.api_key,
+                "url": result.url,
+                "render_js": "false",
+                "premium_proxy": "true",
+                "country_code": "us",
+                "extract_rules": json.dumps({
+                    "title": "title",
+                    "headings": "h1,h2,h3",
+                    "paragraphs": "p",
+                    "main_content": "main,article,.content,.post-content"
+                })
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self.base_url,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=15)
+                ) as response:
+                    if response.status == 200:
+                        response_data = await response.json()
+                        enhanced_content = self._extract_meaningful_content(response_data)
+                        result.enhanced_content = enhanced_content
+                        result.scraped_at = time.time()
+                        result.cost += self.cost_per_query
+                        result.confidence_score = min(result.confidence_score + 0.2, 1.0)
+                        if not hasattr(result, 'metadata'):
+                            result.metadata = {}
+                        result.metadata.update({
+                            "enhanced": True,
+                            "content_length": len(enhanced_content),
+                            "scraped_at": result.scraped_at,
+                            "extraction_success": True
+                        })
+                        logger.info(f"Enhanced content for {result.url} ({len(enhanced_content)} chars)")
+                    else:
+                        logger.warning(f"ScrapingBee failed for {result.url}: {response.status}")
+                        if not hasattr(result, 'metadata'):
+                            result.metadata = {}
+                        result.metadata.update({
+                            "enhancement_failed": True,
+                            "error_status": response.status
+                        })
         except Exception as e:
             logger.error(f"Content enhancement failed for {result.url}: {str(e)}")
-            
+            if not hasattr(result, 'metadata'):
+                result.metadata = {}
+            result.metadata.update({
+                "enhancement_failed": True,
+                "error": str(e)
+            })
         return result
-    
-    def _extract_content(self, html_content: str) -> str:
-        """Extract meaningful content from HTML"""
-        # Simplified content extraction
-        # In production, use BeautifulSoup or similar
-        content = html_content[:2000]  # First 2000 chars
-        return content.strip()
+
+    def _extract_meaningful_content(self, response_data):
+        """Extract meaningful content from ScrapingBee response"""
+        try:
+            extracted = response_data.get("extracted", {})
+            content_parts = []
+            title = extracted.get("title", "")
+            if title and isinstance(title, list):
+                title = " ".join(title)
+            if title:
+                content_parts.append(f"Title: {title}")
+            headings = extracted.get("headings", [])
+            if headings:
+                content_parts.append("Key Topics: " + " | ".join(headings[:5]))
+            paragraphs = extracted.get("paragraphs", [])
+            if paragraphs:
+                good_paragraphs = [p for p in paragraphs if len(p) > 50]
+                content_parts.extend(good_paragraphs[:3])
+            main_content = extracted.get("main_content", [])
+            if main_content:
+                content_parts.extend(main_content[:2])
+            full_content = "\n\n".join(content_parts)
+            if len(full_content) > 3000:
+                full_content = full_content[:3000] + "..."
+            return full_content.strip()
+        except Exception as e:
+            logger.error(f"Content extraction failed: {e}")
+            return ""
     
     async def search(self, query: str, max_results: int = 10) -> SearchResponse:
         """

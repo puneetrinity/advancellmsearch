@@ -8,15 +8,15 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
+from datetime import datetime
 
 from app.graphs.base import (
     BaseGraph, BaseGraphNode, GraphState, NodeResult, 
-    GraphType, NodeType
+    GraphType, NodeType, START, EndNode
 )
 from app.models.manager import ModelManager, TaskType, QualityLevel
 from app.models.ollama_client import ModelResult
 from app.core.logging import get_logger
-from langgraph.constants import START, END
 
 logger = get_logger("graphs.chat")
 
@@ -280,99 +280,130 @@ class ResponseGeneratorNode(BaseGraphNode):
         """Select optimal model based on intent and complexity."""
         intent = getattr(state, 'query_intent', 'conversation')
         complexity = getattr(state, 'query_complexity', 0.5)
+        quality = getattr(state, 'quality_requirement', None)
         
-        # Simple model selection logic
-        if complexity > 0.7:
-            return "llama2:13b"  # Use larger model for complex queries
-        elif intent == "code":
-            return "codellama:7b"  # Use code-specific model
-        else:
-            return "llama2:7b"  # Default model
-    
-    def _build_prompt(self, state: GraphState) -> str:
-        """Build prompt from state context."""
-        prompt_parts = []
-        
-        # Add system context
-        prompt_parts.append("You are a helpful AI assistant.")
-        
-        # Add conversation history
-        if state.conversation_history:
-            prompt_parts.append("\nConversation history:")
-            for msg in state.conversation_history[-3:]:  # Last 3 exchanges
-                if isinstance(msg, dict):
-                    role = msg.get("role", "unknown")
-                    content = msg.get("content", "")
-                else:
-                    # Assume ChatMessage object or similar
-                    role = getattr(msg, "role", "unknown")
-                    content = getattr(msg, "content", "")
-                prompt_parts.append(f"{role.title()}: {content}")
-        
-        # Add style preferences
-        context = state.intermediate_results.get("conversation_context", {})
-        style = context.get("preferred_response_style", "balanced")
-        if style == "concise":
-            prompt_parts.append("Note: Keep response concise and to the point.")
-        elif style == "detailed":
-            prompt_parts.append("Note: Provide comprehensive and detailed explanations.")
-        
-        # Add current query
-        prompt_parts.append(f"User: {state.processed_query}")
-        prompt_parts.append("Assistant:")
-        
-        return "\n".join(prompt_parts)
-    
-    def _calculate_max_tokens(self, state: GraphState) -> int:
-        """Calculate appropriate max tokens based on context."""
-        context = state.intermediate_results.get("conversation_context", {})
-        style = context.get("preferred_response_style", "balanced")
-        complexity = getattr(state, 'query_complexity', 0.5)
-        
-        base_tokens = {
-            "concise": 150,
-            "balanced": 300,
-            "detailed": 500
-        }.get(style, 300)
-        
-        # Adjust for complexity
-        if complexity > 0.7:
-            base_tokens = int(base_tokens * 1.5)
-        elif complexity < 0.3:
-            base_tokens = int(base_tokens * 0.7)
-        
-        return min(base_tokens, 800)  # Cap at 800 tokens
-    
-    def _calculate_temperature(self, state: GraphState) -> float:
-        """Calculate appropriate temperature based on intent."""
-        intent = getattr(state, 'query_intent', 'question')
-        
-        temperature_mapping = {
-            "creative": 0.8,
-            "conversation": 0.7,
-            "question": 0.5,
-            "analysis": 0.3,
-            "code": 0.2,
-            "request": 0.5
+        # Map intent to task type
+        intent_to_task = {
+            'code': TaskType.CODE_TASKS,
+            'analysis': TaskType.ANALYTICAL_REASONING,
+            'creative': TaskType.CREATIVE_WRITING,
+            'question': TaskType.QA_AND_SUMMARY,
+            'request': TaskType.QA_AND_SUMMARY,
+            'conversation': TaskType.CONVERSATION
         }
         
-        return temperature_mapping.get(intent, 0.6)
-    
+        task_type = intent_to_task.get(intent, TaskType.CONVERSATION)
+        
+        # Map complexity and quality to quality level
+        if quality == "premium" or complexity > 0.8:
+            quality_level = QualityLevel.PREMIUM
+        elif quality == "minimal" or complexity < 0.3:
+            quality_level = QualityLevel.MINIMAL
+        else:
+            quality_level = QualityLevel.BALANCED
+        
+        return self.model_manager.select_optimal_model(task_type, quality_level)
+
+    def _build_prompt(self, state: GraphState) -> str:
+        """Build context-aware prompt for response generation."""
+        query = getattr(state, 'processed_query', None) or getattr(state, 'original_query', None)
+        
+        # Get conversation context if available
+        context = state.intermediate_results.get("conversation_context", {})
+        expertise_level = context.get("user_expertise_level", "intermediate")
+        response_style = context.get("preferred_response_style", "balanced")
+        
+        # Build system prompt based on intent
+        intent = getattr(state, 'query_intent', 'conversation')
+        
+        system_prompts = {
+            'code': f"You are a helpful programming assistant. Provide clear, working code examples with explanations suitable for {expertise_level} level users.",
+            'analysis': f"You are an analytical expert. Provide thorough, balanced analysis with evidence and reasoning for {expertise_level} level understanding.",
+            'creative': f"You are a creative assistant. Generate original, engaging content that is {response_style} in style.",
+            'question': f"You are a knowledgeable assistant. Answer questions clearly and accurately for {expertise_level} level users.",
+            'request': f"You are a helpful assistant. Fulfill requests efficiently and provide {response_style} responses.",
+            'conversation': f"You are a friendly conversational AI. Engage naturally with {response_style} tone."
+        }
+        
+        system_prompt = system_prompts.get(intent, system_prompts['conversation'])
+        
+        # Add conversation history if available
+        history_text = ""
+        if hasattr(state, 'conversation_history') and state.conversation_history:
+            recent_history = state.conversation_history[-3:]
+            for msg in recent_history:
+                role = msg.get('role', 'unknown') if isinstance(msg, dict) else getattr(msg, 'role', 'unknown')
+                content = msg.get('content', '')[:200] if isinstance(msg, dict) else getattr(msg, 'content', '')[:200]
+                history_text += f"{role}: {content}\n"
+        
+        # Build final prompt
+        if history_text:
+            prompt = f"{system_prompt}\n\nConversation history:\n{history_text}\nUser: {query}\nAssistant:"
+        else:
+            prompt = f"{system_prompt}\n\nUser: {query}\nAssistant:"
+        
+        return prompt
+
+    def _calculate_max_tokens(self, state: GraphState) -> int:
+        """Calculate appropriate max tokens based on query complexity and intent."""
+        intent = getattr(state, 'query_intent', 'conversation')
+        complexity = getattr(state, 'query_complexity', 0.5)
+        
+        # Base token counts by intent
+        base_tokens = {
+            'code': 400,  # Code needs more space for examples
+            'analysis': 500,  # Analysis needs detailed explanations
+            'creative': 350,  # Creative content needs moderate space
+            'question': 300,  # Questions need concise answers
+            'request': 250,  # Requests usually need brief responses
+            'conversation': 200  # Conversations should be concise
+        }
+        
+        base_count = base_tokens.get(intent, 250)
+        
+        # Adjust based on complexity
+        complexity_multiplier = 0.5 + (complexity * 1.0)  # 0.5x to 1.5x
+        adjusted_count = int(base_count * complexity_multiplier)
+        
+        # Ensure reasonable bounds
+        return max(100, min(adjusted_count, 800))
+
+    def _calculate_temperature(self, state: GraphState) -> float:
+        """Calculate appropriate temperature based on intent and requirements."""
+        intent = getattr(state, 'query_intent', 'conversation')
+        
+        # Temperature settings by intent
+        temperatures = {
+            'code': 0.1,  # Code needs to be precise
+            'analysis': 0.3,  # Analysis needs to be mostly factual
+            'creative': 0.8,  # Creative content benefits from randomness
+            'question': 0.2,  # Questions need accurate answers
+            'request': 0.4,  # Requests need balanced responses
+            'conversation': 0.6  # Conversations can be more natural
+        }
+        
+        return temperatures.get(intent, 0.5)
+
     def _post_process_response(self, response: str, state: GraphState) -> str:
-        """Post-process generated response."""
-        # Basic cleanup
+        """Post-process the generated response."""
+        # Clean up the response
         response = response.strip()
         
-        # Remove any artifacts from prompt structure
-        if response.startswith("Assistant:"):
-            response = response[10].strip()
+        # Remove any unwanted prefixes
+        prefixes_to_remove = ["Assistant:", "AI:", "Response:", "Answer:"]
+        for prefix in prefixes_to_remove:
+            if response.startswith(prefix):
+                response = response[len(prefix):].strip()
         
         # Ensure response ends properly
-        if not response.endswith(('.', '!', '?', ':', '"', "'")):
-            # Find last complete sentence
-            sentences = response.split('.')
-            if len(sentences) > 1 and sentences[-1].strip():
-                response = '.'.join(sentences[:-1]) + '.'
+        if response and not response.endswith(('.', '!', '?', ':', '```')):
+            response += '.'
+        
+        # Add helpful context for code responses
+        intent = getattr(state, 'query_intent', 'conversation')
+        if intent == 'code' and '```' in response:
+            if not response.endswith('\n\nLet me know if you need any clarification or have questions about this code!'):
+                response += '\n\nLet me know if you need any clarification or have questions about this code!'
         
         return response
 
@@ -386,79 +417,131 @@ class CacheUpdateNode(BaseGraphNode):
         self.cache_manager = cache_manager
     
     async def execute(self, state: GraphState, **kwargs) -> NodeResult:
+        """Update conversation cache with current state."""
         logger.debug(f"[CacheUpdateNode] Enter execute. state.query_id={getattr(state, 'query_id', None)}")
+        
         try:
-            updates_made = []
+            if not self.cache_manager:
+                # No cache manager - skip caching
+                return NodeResult(
+                    success=True,
+                    data={"cached": False, "reason": "no_cache_manager"},
+                    confidence=1.0,
+                    execution_time=0.01
+                )
             
-            # ENSURE final_response is set if not already set
-            if not state.final_response:
-                response_data = state.intermediate_results.get("response_generator", {})
-                generated_response = response_data.get("response", "")
-                if generated_response:
-                    state.final_response = generated_response
+            session_id = getattr(state, 'session_id', None)
+            if not session_id:
+                # No session ID - skip caching
+                return NodeResult(
+                    success=True,
+                    data={"cached": False, "reason": "no_session_id"},
+                    confidence=1.0,
+                    execution_time=0.01
+                )
             
-            # Update conversation history
-            if state.session_id and self.cache_manager:
-                # Add current exchange to history
-                new_exchange = [
-                    {"role": "user", "content": state.original_query, "timestamp": time.time()},
-                    {"role": "assistant", "content": state.final_response, "timestamp": time.time()}
+            # Prepare conversation entry
+            conversation_entry = {
+                "user_message": getattr(state, 'original_query', None),
+                "assistant_response": getattr(state, 'final_response', None),
+                "query_id": getattr(state, 'query_id', None),
+                "timestamp": datetime.now().isoformat(),
+                "intent": getattr(state, 'query_intent', 'unknown'),
+                "complexity": getattr(state, 'query_complexity', 0.0),
+                "total_cost": state.calculate_total_cost() if hasattr(state, 'calculate_total_cost') else None,
+                "execution_time": state.calculate_total_time() if hasattr(state, 'calculate_total_time') else None,
+                "models_used": [
+                    result["result"].model_used 
+                    for result in getattr(state, 'node_results', {}).values() 
+                    if hasattr(result["result"], 'model_used')
                 ]
-                
-                updated_history = state.conversation_history + new_exchange
-                
-                # Keep only recent history (last 20 exchanges)
-                if len(updated_history) > 40:  # 20 exchanges = 40 messages
-                    updated_history = updated_history[-40:]
-                
-                await self.cache_manager.update_conversation_history(
-                    state.session_id, 
-                    updated_history
-                )
-                updates_made.append("conversation_history")
+            }
             
-            # Cache successful routing patterns
-            if not state.errors and self.cache_manager:
-                await self.cache_manager.cache_successful_route(
-                    state.original_query,
-                    state.execution_path,
-                    state.calculate_total_cost()
-                )
-                updates_made.append("routing_pattern")
+            # Cache conversation history
+            history_key = f"conversation_history:{session_id}"
+            try:
+                # Get existing history
+                existing_history = await self.cache_manager.get(history_key, [])
+                if not isinstance(existing_history, list):
+                    existing_history = []
+                
+                # Add new entry
+                existing_history.append(conversation_entry)
+                
+                # Keep only last 50 entries
+                if len(existing_history) > 50:
+                    existing_history = existing_history[-50:]
+                
+                # Save updated history (TTL: 7 days)
+                await self.cache_manager.set(history_key, existing_history, ttl=604800)
+                
+            except Exception as cache_error:
+                logger.warning(f"Failed to cache conversation history: {cache_error}")
             
-            # Update user preferences
-            if state.user_id and self.cache_manager:
-                context = state.intermediate_results.get("conversation_context", {})
-                if context:
-                    await self.cache_manager.update_user_pattern(
-                        state.user_id,
-                        {
-                            "expertise_level": context.get("user_expertise_level"),
-                            "response_style": context.get("preferred_response_style"),
-                            "conversation_mood": context.get("conversation_mood"),
-                            "last_interaction": time.time()
-                        }
-                    )
-                    updates_made.append("user_preferences")
+            # Cache user context and preferences
+            context_key = f"user_context:{session_id}"
+            try:
+                user_context = state.intermediate_results.get("conversation_context", {})
+                if user_context:
+                    # Update with current interaction
+                    user_context["last_interaction"] = datetime.now().isoformat()
+                    user_context["total_interactions"] = user_context.get("total_interactions", 0) + 1
+                    
+                    # Save context (TTL: 30 days)
+                    await self.cache_manager.set(context_key, user_context, ttl=2592000)
+            
+            except Exception as context_error:
+                logger.warning(f"Failed to cache user context: {context_error}")
+            
+            # Cache query patterns for analytics
+            pattern_key = f"query_pattern:{getattr(state, 'query_intent', 'unknown')}"
+            try:
+                pattern_data = {
+                    "query": getattr(state, 'original_query', '')[:100],  # Truncated for privacy
+                    "intent": getattr(state, 'query_intent', 'unknown'),
+                    "complexity": getattr(state, 'query_complexity', 0.0),
+                    "timestamp": datetime.now().isoformat(),
+                    "success": bool(getattr(state, 'final_response', None)),
+                    "cost": state.calculate_total_cost() if hasattr(state, 'calculate_total_cost') else None
+                }
+                
+                # Get existing patterns
+                existing_patterns = await self.cache_manager.get(pattern_key, [])
+                if not isinstance(existing_patterns, list):
+                    existing_patterns = []
+                
+                existing_patterns.append(pattern_data)
+                
+                # Keep only last 100 patterns per intent
+                if len(existing_patterns) > 100:
+                    existing_patterns = existing_patterns[-100:]
+                
+                # Save patterns (TTL: 90 days)
+                await self.cache_manager.set(pattern_key, existing_patterns, ttl=7776000)
+                
+            except Exception as pattern_error:
+                logger.warning(f"Failed to cache query patterns: {pattern_error}")
             
             logger.debug(f"[CacheUpdateNode] Success. state.query_id={getattr(state, 'query_id', None)}")
+            
             return NodeResult(
                 success=True,
                 data={
-                    "updates_made": updates_made,
-                    "cache_operations": len(updates_made)
+                    "cached": True,
+                    "conversation_cached": True,
+                    "context_cached": bool(state.intermediate_results.get("conversation_context")),
+                    "patterns_cached": True
                 },
                 confidence=1.0,
-                execution_time=0.05  # Cache operations are fast
+                execution_time=0.05
             )
             
         except Exception as e:
             logger.error(f"[CacheUpdateNode] Error: {e}")
             return NodeResult(
-                success=True,  # Non-critical failure
-                data={"updates_made": []},
-                confidence=0.5,
-                error=f"Cache update failed: {str(e)}"
+                success=False,
+                error=f"Cache update failed: {str(e)}",
+                execution_time=0.05
             )
 
 class ErrorHandlerNode(BaseGraphNode):
@@ -557,33 +640,31 @@ class ChatGraph(BaseGraph):
     
     def define_nodes(self) -> Dict[str, BaseGraphNode]:
         """Define all nodes for the chat graph."""
+        from app.graphs.base import EndNode
         return {
+            "start": ContextManagerNode(self.cache_manager),  # Entrypoint for LangGraph
             "context_manager": ContextManagerNode(self.cache_manager),
             "intent_classifier": IntentClassifierNode(self.model_manager),
             "response_generator": ResponseGeneratorNode(self.model_manager),
             "cache_update": CacheUpdateNode(self.cache_manager),
-            "error_handler": ErrorHandlerNode()  # Include error handler in initial nodes
+            "error_handler": ErrorHandlerNode(),
+            "end": EndNode()  # Add end node for LangGraph termination
         }
     
     def define_edges(self) -> List[tuple]:
         """
-        Define the flow between nodes using proper LangGraph constants.
-        
-        Fixed to use START and END constants and include conditional edges.
+        Define the flow between nodes using descriptive node keys.
         """
         return [
-            # Use START constant for entry point
-            (START, "context_manager"),
+            ("start", "context_manager"),  # Entry edge for LangGraph
             ("context_manager", "intent_classifier"),
             ("intent_classifier", "response_generator"),
             ("response_generator", "cache_update"),
-            # Add conditional edge for error handling
             ("cache_update", self._check_for_errors, {
                 "error_handler": "error_handler",
-                "continue": END
+                "continue": "end"  # End the graph if no error
             }),
-            # Use END constant for exit point
-            ("error_handler", END)
+            ("error_handler", "end")  # End after error handling
         ]
     
     def _check_for_errors(self, state: GraphState) -> str:

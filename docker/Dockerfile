@@ -14,10 +14,14 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt requirements-dev.txt ./
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir -r requirements-dev.txt
 
 # Copy application code
 COPY . .
+
+# Ensure wait-for-ollama.sh is executable
+RUN chmod +x /app/docker/wait-for-ollama.sh
 
 # Create non-root user
 RUN adduser --disabled-password --gecos '' appuser && chown -R appuser:appuser /app

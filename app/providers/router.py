@@ -43,13 +43,69 @@ class BraveSearchProvider:
         if not self.api_key:
             logger.warning("Brave Search API key not configured")
             return []
-        # TODO: Implement actual Brave Search API call
-        logger.info(f"Brave search called for: {query}")
-        return []
-    def is_available(self) -> bool:
-        """Check if Brave Search is available"""
-        return bool(self.api_key)
+        try:
+            import aiohttp
+            import json
+            headers = {
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+                "X-Subscription-Token": self.api_key
+            }
+            params = {
+                "q": query,
+                "count": 10,
+                "offset": 0,
+                "mkt": "en-US",
+                "safesearch": "moderate",
+                "text_decorations": False,
+                "spellcheck": True
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self.base_url, 
+                    headers=headers, 
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status != 200:
+                        logger.error(f"Brave API error: {response.status}")
+                        return []
+                    data = await response.json()
+                    results = []
+                    web_results = data.get("web", {}).get("results", [])
+                    for item in web_results:
+                        result = {
+                            "title": item.get("title", ""),
+                            "url": item.get("url", ""),
+                            "snippet": item.get("description", ""),
+                            "provider": "brave",
+                            "relevance_score": self._calculate_relevance_score(item),
+                            "metadata": {
+                                "brave_score": item.get("score", 0),
+                                "age": item.get("age", ""),
+                                "family_friendly": item.get("family_friendly", True)
+                            }
+                        }
+                        results.append(result)
+                    logger.info(f"Brave search returned {len(results)} results for: {query}")
+                    return results
+        except Exception as e:
+            logger.error(f"Brave search failed: {str(e)}")
+            return []
 
+    def _calculate_relevance_score(self, result_item):
+        """Calculate relevance score for search result"""
+        score = 0.5  # Base score
+        brave_score = result_item.get("score", 0)
+        if brave_score > 0:
+            score += min(brave_score / 100, 0.3)
+        if result_item.get("title"):
+            score += 0.1
+        description = result_item.get("description", "")
+        if len(description) > 50:
+            score += 0.1
+        return min(score, 1.0)
+        
 class SmartSearchRouter:
     """
     The SmartSearchRouter class that your main.py is trying to import and initialize
