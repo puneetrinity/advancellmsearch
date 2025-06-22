@@ -804,6 +804,95 @@ class SearchGraph(BaseGraph):
                     await node.cleanup()
                 except Exception as e:
                     logger.warning(f"Error cleaning up node {node.node_id}: {e}")
+    
+    async def execute_search_workflow(self, state: GraphState) -> Dict[str, Any]:
+        """
+        Main search workflow execution combining all search nodes.
+        Orchestrates the complete search and analysis pipeline.
+        """
+        query = state.get("query", "")
+        user_context = state.get("context", {})
+        constraints = state.get("constraints", {})
+        logger.info("Starting search workflow", query=query)
+        try:
+            # Step 1: Query Expansion for better search results
+            expanded_queries = await self._expand_query_node.execute(state)
+            if not expanded_queries.success:
+                return {"error": "Query expansion failed", "confidence": 0.0}
+            # Step 2: Multi-provider web search
+            search_results = await self._web_search_node.execute({
+                **state,
+                "expanded_queries": expanded_queries.data
+            })
+            if not search_results.success:
+                return {"error": "Web search failed", "confidence": 0.0}
+            # Step 3: Content scraping for top results
+            scraped_content = await self._content_scraping_node.execute({
+                **state,
+                "search_results": search_results.data
+            })
+            # Step 4: AI-powered content analysis
+            content_analysis = await self._content_analysis_node.execute({
+                **state,
+                "scraped_content": scraped_content.data if scraped_content.success else {},
+                "search_results": search_results.data
+            })
+            # Step 5: Synthesize final response with citations
+            final_response = await self._response_synthesis_node.execute({
+                **state,
+                "analysis": content_analysis.data if content_analysis.success else {},
+                "search_results": search_results.data,
+                "scraped_content": scraped_content.data if scraped_content.success else {}
+            })
+            if final_response.success:
+                return {
+                    "response": final_response.data.get("synthesized_response", ""),
+                    "citations": final_response.data.get("citations", []),
+                    "confidence": final_response.confidence,
+                    "search_metadata": {
+                        "queries_used": expanded_queries.data.get("expanded_queries", []),
+                        "sources_found": len(search_results.data.get("results", [])),
+                        "content_analyzed": len(scraped_content.data.get("scraped_urls", [])) if scraped_content.success else 0
+                    }
+                }
+            else:
+                return {"error": "Response synthesis failed", "confidence": 0.0}
+        except Exception as e:
+            logger.error(f"Search workflow failed: {str(e)}")
+            return {"error": f"Search workflow error: {str(e)}", "confidence": 0.0}
+
+    async def process_search_request(self, query: str, context: Optional[Dict] = None,
+                                   constraints: Optional[Dict] = None) -> Dict[str, Any]:
+        """
+        Public interface for search processing. Integrates with the multi-provider system.
+        """
+        # Initialize state for the search workflow
+        state = GraphState(
+            query=query,
+            context=context or {},
+            constraints=constraints or {},
+            metadata={"timestamp": time.time(), "search_type": "web_search"}
+        )
+        # Execute the complete search workflow
+        result = await self.execute_search_workflow(state)
+        # Add cost tracking and metadata
+        result["cost_breakdown"] = self._calculate_search_costs(state, result)
+        result["execution_time"] = time.time() - state.metadata["timestamp"]
+        return result
+
+    def _calculate_search_costs(self, state: GraphState, result: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Calculate detailed cost breakdown for the search operation.
+        """
+        base_search_cost = 0.42  # Brave Search API cost
+        scraping_cost = len(result.get("search_metadata", {}).get("scraped_urls", [])) * 0.84
+        ai_analysis_cost = 0.05  # Local model cost for analysis
+        return {
+            "search_api": base_search_cost,
+            "content_scraping": scraping_cost,
+            "ai_analysis": ai_analysis_cost,
+            "total": base_search_cost + scraping_cost + ai_analysis_cost
+        }
 
 
 # Convenience function for simple search workflow

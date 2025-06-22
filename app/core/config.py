@@ -133,10 +133,8 @@ class TestingSettings(Settings):
     """Testing environment settings"""
     debug: bool = True
     environment: str = "testing"
-    
     # Use in-memory or test databases
-    redis_url: str = "redis://localhost:6379/1"  # Different DB for tests
-    
+    redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/1")  # Use env var if set, else default
     # Faster timeouts for tests
     ollama_timeout: int = 10
     redis_timeout: int = 1

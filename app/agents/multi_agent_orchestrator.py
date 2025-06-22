@@ -1355,3 +1355,99 @@ class MultiAgentOrchestrator:
             timeout=timeout,
             max_retries=max_retries
         )
+
+    async def run_research_workflow(self, research_plan: List[Dict[str, Any]], user_context: Optional[Dict] = None) -> Dict[str, Any]:
+        """
+        Orchestrates a multi-agent research workflow based on a research plan.
+        Each step can be handled by a different agent, with dependencies and context sharing.
+        """
+        logger.info("Starting multi-agent research workflow", plan=research_plan)
+        state = GraphState(context=user_context or {})
+        tasks = []
+        task_id_map = {}
+        # Build AgentTasks from research plan
+        for step in research_plan:
+            agent_type = step["agent_type"]
+            task_type = step.get("task_type", "research")
+            description = step.get("description", "")
+            input_data = step.get("input_data", {})
+            dependencies = [task_id_map[dep] for dep in step.get("depends_on", []) if dep in task_id_map]
+            task = self.build_task(
+                agent_type=agent_type,
+                task_type=task_type,
+                description=description,
+                input_data=input_data,
+                dependencies=dependencies
+            )
+            tasks.append(task)
+            task_id_map[step["id"]] = task.task_id
+        # Execute all tasks with dependency resolution
+        results = await self.execute_tasks(tasks, state)
+        # Aggregate results
+        aggregated = {
+            "results": {tid: res.to_dict() for tid, res in results.items()},
+            "success": all(res.success for res in results.values()),
+            "errors": [res.error for res in results.values() if not res.success]
+        }
+        logger.info("Research workflow complete", success=aggregated["success"])
+        return aggregated
+
+    async def execute_research_workflow(self, research_question: str, methodology: str = "systematic", constraints: Optional[Dict] = None) -> Dict[str, Any]:
+        """
+        Convenience method to build and run a standard multi-agent research workflow.
+        """
+        constraints = constraints or {}
+        workflow_id = str(uuid.uuid4())
+        logger.info("Starting research workflow", question=research_question, methodology=methodology, workflow_id=workflow_id)
+        # Build the standard research plan steps
+        research_plan = [
+            {
+                "id": "planning",
+                "agent_type": AgentType.PLANNING_AGENT,
+                "task_type": "research_planning",
+                "description": f"Create research plan for: {research_question}",
+                "input_data": {
+                    "research_question": research_question,
+                    "methodology": methodology,
+                    "constraints": constraints
+                },
+                "depends_on": []
+            },
+            {
+                "id": "research",
+                "agent_type": AgentType.RESEARCH_AGENT,
+                "task_type": "information_gathering",
+                "description": "Gather comprehensive information",
+                "input_data": {"research_plan": "planning_output"},
+                "depends_on": ["planning"]
+            },
+            {
+                "id": "analysis",
+                "agent_type": AgentType.ANALYSIS_AGENT,
+                "task_type": "data_analysis",
+                "description": "Analyze research findings",
+                "input_data": {"research_data": "research_output"},
+                "depends_on": ["research"]
+            },
+            {
+                "id": "fact_check",
+                "agent_type": AgentType.FACT_CHECK_AGENT,
+                "task_type": "fact_verification",
+                "description": "Verify critical claims and sources",
+                "input_data": {"analysis_results": "analysis_output"},
+                "depends_on": ["analysis"]
+            },
+            {
+                "id": "synthesis",
+                "agent_type": AgentType.SYNTHESIS_AGENT,
+                "task_type": "report_generation",
+                "description": "Generate comprehensive research report",
+                "input_data": {
+                    "all_findings": "multiple_outputs",
+                    "research_question": research_question
+                },
+                "depends_on": ["fact_check"]
+            }
+        ]
+        # Run the workflow using the generic method
+        return await self.run_research_workflow(research_plan)

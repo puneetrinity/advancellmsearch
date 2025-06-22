@@ -26,7 +26,7 @@ import uvicorn
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger, LoggingMiddleware, get_correlation_id
 from app.api.security import SecurityMiddleware, auth_stub
-from app.api import chat, search
+from app.api import chat, search, research
 from app.models.manager import ModelManager
 from app.cache.redis_client import CacheManager
 from app.graphs.chat_graph import ChatGraph
@@ -650,6 +650,12 @@ app.include_router(
     prefix="/api/v1/chat",
     tags=["Chat"],
     dependencies=[]
+)
+
+app.include_router(
+    research.router,
+    prefix="/api/v1/research",
+    tags=["research"]
 )
 
 

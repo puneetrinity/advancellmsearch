@@ -430,7 +430,71 @@ class SmartSearchRouter:
                 return await self.providers[SearchProvider.DUCKDUCKGO].search(query, max_results)
             else:
                 raise
-    
+
+    async def search_with_fallback(self, query: str, max_results: int = 10, 
+                                  budget: float = 1.0, quality_level: str = "balanced") -> SearchResponse:
+        """
+        Main search method with intelligent provider routing and fallback logic.
+        Integrates budget management and quality optimization.
+        """
+        start_time = time.time()
+        # Determine optimal provider based on budget and quality requirements
+        primary_provider = self._select_primary_provider(budget, quality_level)
+        logger.info(f"Starting search with provider: {primary_provider.value}", 
+                    extra={"query": query, "budget": budget, "quality": quality_level})
+        try:
+            # Execute primary search
+            response = await self._execute_search_with_provider(
+                primary_provider, query, max_results
+            )
+            # Enhance results if budget allows and quality requires it
+            if budget > 1.0 and quality_level in ["high", "premium"]:
+                response = await self._enhance_top_results(response, max_enhance=3)
+                response.enhanced = True
+            response.search_time = time.time() - start_time
+            return response
+        except Exception as e:
+            logger.error(f"Primary search failed: {str(e)}", extra={"provider": primary_provider.value})
+            # Fallback to DuckDuckGo if primary fails
+            if primary_provider != SearchProvider.DUCKDUCKGO:
+                logger.info("Falling back to DuckDuckGo")
+                try:
+                    fallback_response = await self._execute_search_with_provider(
+                        SearchProvider.DUCKDUCKGO, query, max_results
+                    )
+                    fallback_response.search_time = time.time() - start_time
+                    return fallback_response
+                except Exception as fallback_error:
+                    logger.error(f"Fallback search also failed: {str(fallback_error)}")
+            raise Exception(f"All search providers failed. Last error: {str(e)}")
+
+    def _select_primary_provider(self, budget: float, quality_level: str) -> SearchProvider:
+        """
+        Intelligent provider selection based on budget and quality requirements.
+        Implements cost-aware routing logic.
+        """
+        if quality_level == "premium" and budget >= 1.5:
+            # Use Brave + ScrapingBee enhancement for premium quality
+            return SearchProvider.BRAVE
+        elif budget >= 0.5:
+            # Use Brave for balanced quality within budget
+            return SearchProvider.BRAVE
+        else:
+            # Use free DuckDuckGo for budget-conscious requests
+            return SearchProvider.DUCKDUCKGO
+
+    async def _execute_search_with_provider(self, provider: SearchProvider, 
+                                           query: str, max_results: int) -> SearchResponse:
+        """
+        Execute search with specific provider, handling provider-specific logic.
+        """
+        search_provider = self.providers[provider]
+        try:
+            return await search_provider.search(query, max_results)
+        except Exception as e:
+            logger.error(f"Search failed with {provider.value}: {str(e)}")
+            raise
+
     async def _enhance_top_results(self, response: SearchResponse, max_enhance: int = 3) -> SearchResponse:
         """Enhance top search results with ScrapingBee"""
         
