@@ -14,10 +14,10 @@ class CostBreakdown(BaseModel):
     step: str = Field(..., description="Processing step name")
     service: str = Field(..., description="Service or model used")
     cost: float = Field(..., description="Cost in INR")
-    duration_ms: Optional[float] = Field(
+    duration_ms: float | None = Field(
         None, description="Step duration in milliseconds"
     )
-    tokens_used: Optional[int] = Field(
+    tokens_used: int | None = Field(
         None, description="Tokens consumed if applicable"
     )
 
@@ -26,19 +26,19 @@ class CostPrediction(BaseModel):
     """Cost prediction and optimization recommendations."""
 
     estimated_cost: float = Field(..., description="Total estimated cost in INR")
-    cost_breakdown: List[CostBreakdown] = Field(
+    cost_breakdown: list[CostBreakdown] = Field(
         default_factory=list, description="Detailed cost breakdown"
     )
-    savings_tips: List[str] = Field(
+    savings_tips: list[str] = Field(
         default_factory=list, description="Cost optimization suggestions"
     )
-    alternative_workflows: Optional[List[Dict[str, Any]]] = Field(
+    alternative_workflows: list[dict[str, Any]] | None = Field(
         None, description="Alternative cheaper workflows"
     )
-    budget_remaining: Optional[float] = Field(
+    budget_remaining: float | None = Field(
         None, description="Remaining user budget in INR"
     )
-    budget_percentage_used: Optional[float] = Field(
+    budget_percentage_used: float | None = Field(
         None, description="Percentage of monthly budget used"
     )
 
@@ -46,16 +46,16 @@ class CostPrediction(BaseModel):
 class DeveloperHints(BaseModel):
     """Developer experience enhancements and debugging information."""
 
-    suggested_next_queries: List[str] = Field(
+    suggested_next_queries: list[str] = Field(
         default_factory=list, description="Suggested follow-up queries"
     )
-    potential_optimizations: Dict[str, str] = Field(
+    potential_optimizations: dict[str, str] = Field(
         default_factory=dict, description="Performance optimization suggestions"
     )
-    knowledge_gaps: List[str] = Field(
+    knowledge_gaps: list[str] = Field(
         default_factory=list, description="Areas where confidence was low"
     )
-    routing_explanation: Optional[str] = Field(
+    routing_explanation: str | None = Field(
         None, description="Why this routing path was chosen"
     )
     cache_hit_info: Optional[str] = Field(

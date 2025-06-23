@@ -13,14 +13,14 @@ from pydantic import BaseModel, Field, field_validator
 class Constraints(BaseModel):
     """Request constraints"""
 
-    max_cost: Optional[float] = Field(0.05, description="Maximum cost in INR")
-    max_time: Optional[float] = Field(
+    max_cost: float | None = Field(0.05, description="Maximum cost in INR")
+    max_time: float | None = Field(
         5.0, description="Maximum execution time in seconds"
     )
-    quality_requirement: Optional[str] = Field(
+    quality_requirement: str | None = Field(
         "balanced", description="Quality level: minimal, balanced, high, premium"
     )
-    force_local_only: Optional[bool] = Field(
+    force_local_only: bool | None = Field(
         False, description="Force local models only"
     )
 
@@ -35,9 +35,9 @@ class Constraints(BaseModel):
 class Context(BaseModel):
     """Request context"""
 
-    user_preferences: Optional[Dict[str, Any]] = Field(default_factory=dict)
-    conversation_history: Optional[List[Dict[str, str]]] = Field(default_factory=list)
-    session_metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    user_preferences: dict[str, Any] | None = Field(default_factory=dict)
+    conversation_history: list[dict[str, str]] | None = Field(default_factory=list)
+    session_metadata: dict[str, Any] | None = Field(default_factory=dict)
 
 
 class ChatMessage(BaseModel):
@@ -45,7 +45,7 @@ class ChatMessage(BaseModel):
 
     role: str = Field(..., description="Message role: user, assistant, system")
     content: str = Field(..., description="Message content")
-    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    metadata: dict[str, Any] | None = Field(default_factory=dict)
 
     @field_validator("role")
     def validate_role(cls, v):

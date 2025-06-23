@@ -20,6 +20,7 @@ from app.core.async_utils import (
     safe_execute,
     safe_graph_execute,
 )
+from app.dependencies import get_model_manager, get_cache_manager
 from app.core.logging import (
     get_correlation_id,
     get_logger,
@@ -28,7 +29,6 @@ from app.core.logging import (
 )
 from app.graphs.base import GraphState
 from app.graphs.chat_graph import ChatGraph
-from app.main import get_dependencies_safely
 from app.models.manager import ModelManager, QualityLevel
 from app.schemas.requests import ChatRequest, ChatStreamRequest
 from app.schemas.responses import (
@@ -143,7 +143,7 @@ async def chat_complete(
             },
         )
         # Retrieve chat_graph from app state using safe helper
-        chat_graph_instance = get_dependencies_safely(request, "chat_graph")
+        chat_graph_instance = await get_model_manager(request)
         if chat_graph_instance is None:
             return create_error_response(
                 message="Chat graph is not initialized.",

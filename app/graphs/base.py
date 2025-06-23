@@ -49,13 +49,13 @@ class NodeResult(BaseModel):
     """Standard result format for graph nodes"""
 
     success: bool
-    data: Dict[str, Any] = {}
+    data: dict[str, Any] = {}
     confidence: float = 0.0
     execution_time: float = 0.0
     cost: float = 0.0
-    model_used: Optional[str] = None
-    error: Optional[str] = None
-    metadata: Dict[str, Any] = {}
+    model_used: str | None = None
+    error: str | None = None
+    metadata: dict[str, Any] = {}
 
 
 @dataclass

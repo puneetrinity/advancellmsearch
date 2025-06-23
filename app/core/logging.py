@@ -7,7 +7,7 @@ import logging.config
 import sys
 import uuid
 from contextvars import ContextVar
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import structlog
 from pythonjsonlogger import jsonlogger

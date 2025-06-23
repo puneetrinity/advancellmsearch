@@ -32,6 +32,7 @@ from app.graphs.search_graph import SearchGraph, execute_search
 from app.models.manager import ModelManager
 from app.performance.optimization import OptimizedSearchSystem
 from app.schemas.responses import HealthStatus, create_error_response
+from app.dependencies import get_model_manager, get_cache_manager
 
 # Add project root to Python path
 project_root = Path(__file__).parent.parent
