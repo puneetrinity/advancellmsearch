@@ -1362,7 +1362,16 @@ class MultiAgentOrchestrator:
         Each step can be handled by a different agent, with dependencies and context sharing.
         """
         logger.info("Starting multi-agent research workflow", plan=research_plan)
-        state = GraphState(context=user_context or {})
+        # Map user_context fields to GraphState fields if provided
+        user_context = user_context or {}
+        state = GraphState(
+            user_preferences=user_context.get("user_preferences", {}),
+            session_id=user_context.get("session_id"),
+            cost_budget_remaining=user_context.get("cost_budget", 20.0),
+            max_cost=user_context.get("cost_budget"),
+            max_execution_time=user_context.get("time_budget", 30.0),
+            quality_requirement=user_context.get("quality_requirement", "balanced")
+        )
         tasks = []
         task_id_map = {}
         # Build AgentTasks from research plan
@@ -1385,7 +1394,7 @@ class MultiAgentOrchestrator:
         results = await self.execute_tasks(tasks, state)
         # Aggregate results
         aggregated = {
-            "results": {tid: res.to_dict() for tid, res in results.items()},
+            "results": {tid: res.dict() for tid, res in results.items()},
             "success": all(res.success for res in results.values()),
             "errors": [res.error for res in results.values() if not res.success]
         }

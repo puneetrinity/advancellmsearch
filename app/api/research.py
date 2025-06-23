@@ -6,8 +6,9 @@ from app.cache.redis_client import CacheManager
 from app.schemas.requests import ResearchRequest
 from app.schemas.responses import ResearchResponse, ResponseMetadata
 from app.api.security import get_current_user, User
-from app.core.config import get_model_manager, get_cache_manager
+from app.dependencies import get_model_manager, get_cache_manager
 import structlog
+import uuid
 
 router = APIRouter()
 logger = structlog.get_logger("research_api")
@@ -26,11 +27,18 @@ async def research_deep_dive(
     try:
         # Initialize multi-agent orchestrator
         orchestrator = MultiAgentOrchestrator(model_manager, cache_manager)
+        # Build constraints dict from request fields
+        constraints = {
+            "cost_budget": request.cost_budget,
+            "time_budget": request.time_budget,
+            "depth_level": request.depth_level,
+            "sources": request.sources
+        }
         # Execute research workflow
         research_results = await orchestrator.execute_research_workflow(
             research_question=request.research_question,
             methodology=request.methodology,
-            constraints=request.constraints.dict() if request.constraints else None
+            constraints=constraints
         )
         if research_results["success"]:
             return ResearchResponse(
@@ -46,11 +54,13 @@ async def research_deep_dive(
                 )
             )
         else:
+            # Provide all required fields for ResponseMetadata in error case
             return ResearchResponse(
                 status="error",
                 data={"error": research_results.get("error", "Unknown research error")},
                 metadata=ResponseMetadata(
-                    query_id=research_results.get("workflow_id", "unknown"),
+                    query_id=research_results.get("workflow_id", str(uuid.uuid4())),
+                    correlation_id=str(uuid.uuid4()),
                     execution_time=0.0,
                     cost=0.0,
                     models_used=[],

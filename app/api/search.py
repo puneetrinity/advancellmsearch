@@ -50,7 +50,7 @@ async def basic_search(
         "Search request started",
         query=search_request.query,
         query_id=query_id,
-        user_id=current_user["user_id"],
+        user_id=current_user.user_id,
         correlation_id=correlation_id
     )
     # Simulate a search result for test
@@ -103,7 +103,7 @@ async def advanced_search(
     logger.info(
         "Advanced search initiated",
         query=body.query,
-        user_id=current_user["user_id"],
+        user_id=current_user.user_id,
         filters=getattr(body, "filters", None),
         budget=getattr(body, "budget", None),
         quality=getattr(body, "quality", None),

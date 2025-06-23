@@ -137,36 +137,44 @@ class ModelManager:
         self.loaded_models: Set[str] = set()
         self._loading_locks: Dict[str, asyncio.Lock] = {}
         
-        # Model assignment configuration
-        self.model_assignments = {
-            TaskType.SIMPLE_CLASSIFICATION: "phi:mini",
-            TaskType.QA_AND_SUMMARY: "llama2:7b",
-            TaskType.ANALYTICAL_REASONING: "mistral:7b",
-            TaskType.DEEP_RESEARCH: "llama2:13b",
-            TaskType.CODE_TASKS: "codellama",
-            TaskType.MULTILINGUAL: "aya:8b",
-            TaskType.CREATIVE_WRITING: "llama2:7b",
-            TaskType.CONVERSATION: "llama2:7b"
+        # Centralized model mapping for easy replaceability
+        self.model_roles = {
+            "default": "tinyllama:latest",
+            "qa": "tinyllama:latest",
+            "research": "tinyllama:latest",
+            "code": "tinyllama:latest",
+            "multilingual": "tinyllama:latest",
+            "creative": "tinyllama:latest",
+            "conversation": "tinyllama:latest"
         }
-        
+        # Model assignment configuration (logical roles)
+        self.model_assignments = {
+            TaskType.SIMPLE_CLASSIFICATION: self.model_roles["default"],
+            TaskType.QA_AND_SUMMARY: self.model_roles["qa"],
+            TaskType.ANALYTICAL_REASONING: self.model_roles["research"],
+            TaskType.DEEP_RESEARCH: self.model_roles["research"],
+            TaskType.CODE_TASKS: self.model_roles["code"],
+            TaskType.MULTILINGUAL: self.model_roles["multilingual"],
+            TaskType.CREATIVE_WRITING: self.model_roles["creative"],
+            TaskType.CONVERSATION: self.model_roles["conversation"]
+        }
         # Priority tiers for memory management
         self.priority_tiers = {
-            "T0": ["phi:mini"],  # Always loaded
-            "T1": ["llama2:7b"],  # Keep warm
-            "T2": ["llama2:13b", "mistral:7b", "codellama", "aya:8b"]  # Load on demand
+            "T0": [self.model_roles["default"]],  # Always loaded
+            "T1": [self.model_roles["qa"]],     # Keep warm
+            "T2": [self.model_roles["research"], self.model_roles["code"], self.model_roles["multilingual"]]  # Load on demand
         }
-        
         # Quality-based model overrides
         self.quality_overrides = {
             QualityLevel.MINIMAL: {
-                TaskType.QA_AND_SUMMARY: "phi:mini",
-                TaskType.ANALYTICAL_REASONING: "llama2:7b",
-                TaskType.DEEP_RESEARCH: "llama2:7b"
+                TaskType.QA_AND_SUMMARY: self.model_roles["default"],
+                TaskType.ANALYTICAL_REASONING: self.model_roles["default"],
+                TaskType.DEEP_RESEARCH: self.model_roles["default"]
             },
             QualityLevel.PREMIUM: {
-                TaskType.SIMPLE_CLASSIFICATION: "llama2:7b",
-                TaskType.QA_AND_SUMMARY: "mistral:7b",
-                TaskType.ANALYTICAL_REASONING: "llama2:13b"
+                TaskType.SIMPLE_CLASSIFICATION: self.model_roles["qa"],
+                TaskType.QA_AND_SUMMARY: self.model_roles["research"],
+                TaskType.ANALYTICAL_REASONING: self.model_roles["research"]
             }
         }
         
@@ -220,8 +228,14 @@ class ModelManager:
         correlation_id = get_correlation_id()
         
         try:
-            available_models = await self.ollama_client.list_models()
-            
+            # Always force refresh to avoid stale cache during test/debug
+            available_models = await self.ollama_client.list_models(force_refresh=True)
+            logger.debug(
+                "Ollama returned models (forced refresh)",
+                ollama_models=[m.get("name") for m in available_models],
+                correlation_id=correlation_id
+            )
+            print("[DEBUG] Ollama returned models:", [m.get("name") for m in available_models])
             for model_data in available_models:
                 model_name = model_data.get("name", "unknown")
                 
@@ -242,6 +256,12 @@ class ModelManager:
                 "Model discovery completed",
                 discovered_models=len(self.models),
                 model_names=list(self.models.keys()),
+                correlation_id=correlation_id
+            )
+            print("[DEBUG] ModelManager self.models after discovery:", list(self.models.keys()))
+            logger.debug(
+                "ModelManager self.models after discovery",
+                model_keys=list(self.models.keys()),
                 correlation_id=correlation_id
             )
             
@@ -314,6 +334,14 @@ class ModelManager:
         # Check if model is available
         available_models = [name for name in self.models.keys() 
                           if name.startswith(base_model.split(':')[0])]
+        
+        logger.debug(
+            "Available models at selection",
+            all_models=list(self.models.keys()),
+            base_model=base_model,
+            available_models=available_models,
+            correlation_id=correlation_id
+        )
         
         if not available_models:
             # Fallback to any available model

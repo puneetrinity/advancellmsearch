@@ -184,6 +184,13 @@ class UserStatsResponse(BaseResponse):
     stats: UserStats = Field(..., description="User statistics")
 
 
+class ResearchResponse(BaseModel):
+    """Research response schema."""
+    status: str = Field(..., description="Response status")
+    data: Dict[str, Any] = Field(..., description="Response data")
+    metadata: ResponseMetadata = Field(..., description="Response metadata")
+
+
 # OpenAI-compatible response models for streaming
 class OpenAIChoice(BaseModel):
     """OpenAI-compatible choice object."""
@@ -277,5 +284,6 @@ __all__ = [
     'OpenAIChatResponse',
     'OpenAIChoice',
     'create_success_response',
-    'create_error_response'
+    'create_error_response',
+    'ResearchResponse'
 ]

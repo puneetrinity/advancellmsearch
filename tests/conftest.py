@@ -8,13 +8,25 @@ import asyncio
 from typing import AsyncGenerator
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
-from app.main import app
-from app.models.manager import ModelManager
-from app.cache.redis_client import CacheManager
-from app.core.config import get_settings
+# Pre-test Ollama model availability check
+import sys
+from app.models.ollama_client import OllamaClient
 from app.api import security
-from app.graphs.base import GraphState
+
+@pytest.fixture(scope="session", autouse=True)
+def ensure_ollama_models():
+    """Fail fast if no models are available in Ollama."""
+    async def check_models():
+        client = OllamaClient(base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
+        await client.initialize()
+        models = await client.list_models(force_refresh=True)
+        if not models:
+            pytest.exit("No models available in Ollama. Aborting tests.", returncode=1)
+    asyncio.get_event_loop().run_until_complete(check_models())
 
 
 @pytest.fixture(scope="session")

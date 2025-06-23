@@ -15,7 +15,7 @@ from datetime import datetime
 from app.core.logging import get_logger, get_correlation_id, set_correlation_id, log_performance
 from app.core.config import get_settings
 from app.core.async_utils import ensure_awaited, safe_execute, safe_graph_execute, coroutine_safe
-from app.api.security import get_current_user, check_content_policy
+from app.api.security import get_current_user, check_content_policy, User
 from app.models.manager import QualityLevel
 from app.graphs.chat_graph import ChatGraph
 from app.models.manager import ModelManager
@@ -84,7 +84,7 @@ async def chat_complete(
     logger.info(
         "Chat completion request started",
         query_id=query_id,
-        user_id=current_user["user_id"],
+        user_id=current_user.user_id,
         message_length=len(chat_request.message),
         session_id=chat_request.session_id,
         correlation_id=correlation_id
@@ -98,12 +98,12 @@ async def chat_complete(
                 error_code="CONTENT_POLICY_VIOLATION",
                 correlation_id=correlation_id
             )
-        session_id = chat_request.session_id or f"chat_{current_user['user_id']}_{int(time.time())}"
+        session_id = chat_request.session_id or f"chat_{current_user.user_id}_{int(time.time())}"
         conversation_history = chat_request.user_context.get("conversation_history", [])
         graph_state = GraphState(
             query_id=query_id,
             correlation_id=correlation_id,
-            user_id=current_user["user_id"],
+            user_id=current_user.user_id,
             session_id=session_id,
             original_query=chat_request.message,
             conversation_history=conversation_history,
@@ -111,7 +111,7 @@ async def chat_complete(
             max_cost=chat_request.max_cost,
             max_execution_time=chat_request.max_execution_time,
             user_preferences={
-                "tier": current_user.get("tier", "free"),
+                "tier": getattr(current_user, "tier", "free"),
                 "response_style": chat_request.response_style,
                 "include_sources": chat_request.include_sources,
                 "force_local_only": chat_request.force_local_only
@@ -260,7 +260,7 @@ async def chat_stream(
     *,
     req: Request,
     streaming_request: ChatStreamRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     correlation_id = str(uuid.uuid4())
     set_correlation_id(correlation_id)
@@ -282,8 +282,9 @@ async def chat_stream(
             policy_check = check_content_policy(user_message)
             if not policy_check["passed"]:
                 yield _create_error_stream_chunk("Content violates policy")
+                yield "data: [DONE]\n\n"
                 return
-            session_id = streaming_request.session_id or f"stream_{current_user['user_id']}_{int(time.time())}"
+            session_id = streaming_request.session_id or f"stream_{current_user.user_id}_{int(time.time())}"
             conversation_history = []
             for msg in streaming_request.messages[:-1]:
                 if isinstance(msg, dict):
@@ -300,7 +301,7 @@ async def chat_stream(
             graph_state = GraphState(
                 query_id=query_id,
                 correlation_id=correlation_id,
-                user_id=current_user["user_id"],
+                user_id=current_user.user_id,
                 session_id=session_id,
                 original_query=user_message,
                 conversation_history=conversation_history,
@@ -308,35 +309,42 @@ async def chat_stream(
                 max_cost=0.10,
                 max_execution_time=30.0,
                 user_preferences={
-                    "tier": current_user.get("tier", "free"),
+                    "tier": getattr(current_user, "tier", "free"),
                     "streaming": True
                 }
             )
-            chat_result = await safe_graph_execute(chat_graph, graph_state, timeout=30.0)
-            chat_result = await ensure_awaited(chat_result)
-            if chat_result.final_response:
-                response_text = chat_result.final_response
-                chunk_size = max(1, len(response_text) // 20)
-                for i in range(0, len(response_text), chunk_size):
-                    chunk = response_text[i:i + chunk_size]
-                    stream_chunk = {
-                        "id": f"chatcmpl-{query_id}",
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": list(chat_result.models_used)[0] if getattr(chat_result, 'models_used', None) else "local",
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"content": chunk},
-                            "finish_reason": None
-                        }]
-                    }
-                    yield f"data: {json.dumps(stream_chunk)}\n\n"
-                    await asyncio.sleep(0.05)
+            # Use streaming LLM generation
+            response_node = chat_graph.get_response_node() if hasattr(chat_graph, 'get_response_node') else None
+            if response_node and hasattr(response_node, 'model_manager'):
+                model_name = response_node._select_model(graph_state)
+                prompt = response_node._build_prompt(graph_state)
+                max_tokens = 300
+                temperature = 0.7
+                async for chunk in response_node.model_manager.ollama_client.generate_stream(
+                    model_name=model_name,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                ):
+                    if hasattr(chunk, 'text') and chunk.text:
+                        stream_chunk = {
+                            "id": f"chatcmpl-{query_id}",
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": model_name,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": chunk.text},
+                                "finish_reason": None
+                            }]
+                        }
+                        yield f"data: {json.dumps(stream_chunk)}\n\n"
+                # Always yield [DONE] at the end
                 final_chunk = {
                     "id": f"chatcmpl-{query_id}",
-                    "object": "chat.completion.chunk", 
+                    "object": "chat.completion.chunk",
                     "created": int(time.time()),
-                    "model": list(chat_result.models_used)[0] if getattr(chat_result, 'models_used', None) else "local",
+                    "model": model_name,
                     "choices": [{
                         "index": 0,
                         "delta": {},
@@ -346,19 +354,55 @@ async def chat_stream(
                 yield f"data: {json.dumps(final_chunk)}\n\n"
                 yield "data: [DONE]\n\n"
             else:
-                yield _create_error_stream_chunk("No response generated")
+                # Fallback: non-streaming
+                chat_result = await safe_graph_execute(chat_graph, graph_state, timeout=30.0)
+                chat_result = await ensure_awaited(chat_result)
+                if chat_result.final_response:
+                    response_text = chat_result.final_response
+                    chunk_size = max(1, len(response_text) // 20)
+                    for i in range(0, len(response_text), chunk_size):
+                        chunk = response_text[i:i + chunk_size]
+                        stream_chunk = {
+                            "id": f"chatcmpl-{query_id}",
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": list(chat_result.models_used)[0] if getattr(chat_result, 'models_used', None) else "local",
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": chunk},
+                                "finish_reason": None
+                            }]
+                        }
+                        yield f"data: {json.dumps(stream_chunk)}\n\n"
+                    final_chunk = {
+                        "id": f"chatcmpl-{query_id}",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": list(chat_result.models_used)[0] if getattr(chat_result, 'models_used', None) else "local",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop"
+                        }]
+                    }
+                    yield f"data: {json.dumps(final_chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
+                else:
+                    yield _create_error_stream_chunk("No response generated")
+                    yield "data: [DONE]\n\n"
         except Exception as e:
             logger.error(f"Streaming error: {e}")
             yield _create_error_stream_chunk(f"Internal error: {str(e)}")
-    return StreamingResponse(
-        generate_safe_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
-    )
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(
+            generate_safe_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
 
 def _create_error_stream_chunk(error_message: str) -> str:
     error_chunk = {

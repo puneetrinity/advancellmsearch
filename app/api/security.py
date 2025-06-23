@@ -5,6 +5,7 @@ Implements security foundations early to prevent rework.
 import html
 import re
 import time
+import os
 from typing import Any, Dict, List, Optional, Set
 from fastapi import HTTPException, Request, Response, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -600,6 +601,96 @@ def check_content_policy(text: str) -> Dict[str, Any]:
     }
 
 
+# User model and API key management
+class User(BaseModel):
+    """User model for API key-based authentication."""
+    user_id: str
+    tier: str = "free"
+    monthly_budget: float = 20.0
+    permissions: List[str] = ["chat"]
+    is_anonymous: bool = False
+    api_key: Optional[str] = None
+
+    def has_permission(self, permission: str) -> bool:
+        return permission in self.permissions
+
+    def has_tier(self, min_tier: str) -> bool:
+        tier_levels = {"anonymous": 0, "free": 1, "pro": 2, "enterprise": 3}
+        user_level = tier_levels.get(self.tier, 0)
+        required_level = tier_levels.get(min_tier, 999)
+        return user_level >= required_level
+
+    def can_afford(self, cost: float) -> bool:
+        return self.monthly_budget >= cost
+
+
+class APIKeyManager:
+    def __init__(self):
+        self.api_keys = {}
+        self.load_keys_from_env()
+
+    def load_keys_from_env(self):
+        admin_key = os.getenv("ADMIN_API_KEY")
+        user_keys = os.getenv("API_KEYS", "").split(",")
+        if admin_key:
+            self.api_keys[admin_key] = {
+                "user_id": "admin_user",
+                "name": "Admin Key",
+                "tier": "enterprise",
+                "monthly_budget": 5000.0,
+                "current_budget": 5000.0,
+                "rate_limit_per_hour": -1,
+                "permissions": ["chat", "search", "research", "analytics", "admin"],
+                "created_at": "2025-01-01",
+                "last_used": None,
+                "status": "active"
+            }
+        for key in user_keys:
+            key = key.strip()
+            if key:
+                self.api_keys[key] = {
+                    "user_id": f"user_{key[-6:]}",
+                    "name": f"User Key {key[-6:]}",
+                    "tier": "free",
+                    "monthly_budget": 20.0,
+                    "current_budget": 20.0,
+                    "rate_limit_per_hour": 60,
+                    "permissions": ["chat", "search"],
+                    "created_at": "2025-01-01",
+                    "last_used": None,
+                    "status": "active"
+                }
+
+    def validate_api_key(self, api_key: str) -> Optional[Dict[str, Any]]:
+        if not api_key or api_key not in self.api_keys:
+            return None
+        user_config = self.api_keys[api_key].copy()
+        if user_config.get("status") != "active":
+            return None
+        self.api_keys[api_key]["last_used"] = "now"
+        return user_config
+
+
+api_key_manager = APIKeyManager()
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> User:
+    api_key = credentials.credentials if credentials else None
+    user_config = api_key_manager.validate_api_key(api_key)
+    if not user_config:
+        return User(user_id="anon", tier="anonymous", monthly_budget=5.0, permissions=["chat"], is_anonymous=True)
+    return User(
+        user_id=user_config["user_id"],
+        tier=user_config["tier"],
+        monthly_budget=user_config["current_budget"],
+        permissions=user_config["permissions"],
+        is_anonymous=False,
+        api_key=api_key
+    )
+
+
 # Export security components
 __all__ = [
     'SecurityMiddleware',
@@ -615,5 +706,8 @@ __all__ = [
     'SecurityViolation',
     'rate_limiter',
     'auth_stub',
-    'security'
+    'security',
+    'User',
+    'APIKeyManager',
+    'api_key_manager'
 ]

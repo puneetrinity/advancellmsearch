@@ -41,8 +41,8 @@ class Settings(BaseSettings):
     redis_timeout: int = 5
     
     # Model Configuration
-    default_model: str = "phi:mini"
-    fallback_model: str = "llama2:7b"
+    default_model: str = "tinyllama:latest"
+    fallback_model: str = "tinyllama:latest"
     max_concurrent_models: int = 3
     model_memory_threshold: float = 0.8
     
@@ -158,18 +158,18 @@ def get_settings() -> Settings:
 
 # Model configuration constants
 MODEL_ASSIGNMENTS = {
-    "simple_classification": "phi:mini",
-    "qa_and_summary": "llama2:7b",
-    "analytical_reasoning": "mistral:7b",
-    "deep_research": "llama2:13b",
-    "code_tasks": "codellama",
-    "multilingual": "aya:8b"
+    "simple_classification": "tinyllama:latest",
+    "qa_and_summary": "tinyllama:latest",
+    "analytical_reasoning": "tinyllama:latest",
+    "deep_research": "tinyllama:latest",
+    "code_tasks": "tinyllama:latest",
+    "multilingual": "tinyllama:latest"
 }
 
 PRIORITY_TIERS = {
-    "T0": ["phi:mini"],  # Always loaded (hot)
-    "T1": ["llama2:7b"],  # Loaded on first use, kept warm
-    "T2": ["llama2:13b", "mistral:7b"]  # Load/unload per request
+    "T0": ["tinyllama:latest"],  # Always loaded (hot)
+    "T1": ["tinyllama:latest"],  # Loaded on first use, kept warm
+    "T2": ["tinyllama:latest"]  # Load/unload per request
 }
 
 # API costs (in INR)
