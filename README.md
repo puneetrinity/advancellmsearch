@@ -1,8 +1,3 @@
-# README.md
-"""
-AI Search System README
-"""
-
 # AI Search System 🚀
 
 Revolutionary AI search system where **intelligence lives in APIs, not interfaces**. Built with LangGraph orchestration, local-first processing via Ollama, and dual-layer metadata infrastructure.
