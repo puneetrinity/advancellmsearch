@@ -87,6 +87,9 @@ async def chat_complete(
         user_id=current_user.user_id,
         message_length=len(chat_request.message),
         session_id=chat_request.session_id,
+        prompt=chat_request.message,
+        user_context=chat_request.user_context,
+        quality_requirement=getattr(chat_request, 'quality_requirement', None),
         correlation_id=correlation_id
     )
     try:
@@ -394,15 +397,16 @@ async def chat_stream(
             logger.error(f"Streaming error: {e}")
             yield _create_error_stream_chunk(f"Internal error: {str(e)}")
             yield "data: [DONE]\n\n"
-        return StreamingResponse(
-            generate_safe_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
-            }
-        )
+            return
+    return StreamingResponse(
+        generate_safe_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 def _create_error_stream_chunk(error_message: str) -> str:
     error_chunk = {

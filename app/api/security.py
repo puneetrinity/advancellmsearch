@@ -566,6 +566,39 @@ class SecureChatInput(SecureTextInput):
         return v
 
 
+class Constraints(BaseModel):
+    """Request constraints with validation"""
+    max_cost: Optional[float] = Field(0.05, ge=0, le=100, description="Maximum cost")
+    max_time: Optional[float] = Field(5.0, ge=0.1, le=300, description="Maximum time")
+    quality_requirement: Optional[str] = Field("balanced", description="Quality level")
+    force_local_only: Optional[bool] = Field(False)
+
+    @field_validator('quality_requirement')
+    @classmethod
+    def validate_quality(cls, v):
+        valid_qualities = ["minimal", "balanced", "high", "premium"]
+        if v not in valid_qualities:
+            raise ValueError(f"Invalid quality_requirement. Must be one of: {valid_qualities}")
+        return v
+
+
+class ChatRequest(BaseModel):
+    """Chat request with proper validation"""
+    message: str = Field(..., min_length=1, max_length=8000, description="Chat message")
+    session_id: Optional[str] = Field(None, description="Session identifier")
+    context: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    constraints: Optional[Constraints] = Field(default_factory=Constraints)
+
+    @field_validator('message')
+    @classmethod
+    def validate_message(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Message cannot be empty")
+        if len(v) > 8000:
+            raise ValueError("Message too long (max 8000 characters)")
+        return v.strip()
+
+
 # Security utilities
 def check_content_policy(text: str) -> Dict[str, Any]:
     """Basic content policy checking."""
@@ -680,12 +713,13 @@ async def get_current_user(
     api_key = credentials.credentials if credentials else None
     user_config = api_key_manager.validate_api_key(api_key)
     if not user_config:
+        # Always return a User object, even for anonymous
         return User(user_id="anon", tier="anonymous", monthly_budget=5.0, permissions=["chat"], is_anonymous=True)
     return User(
         user_id=user_config["user_id"],
         tier=user_config["tier"],
-        monthly_budget=user_config["current_budget"],
-        permissions=user_config["permissions"],
+        monthly_budget=user_config.get("current_budget", user_config.get("monthly_budget", 20.0)),
+        permissions=user_config.get("permissions", ["chat"]),
         is_anonymous=False,
         api_key=api_key
     )

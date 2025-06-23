@@ -196,7 +196,7 @@ class TestChatAPIIntegration:
         assert response1.status_code in (200, 422)
         response2 = await integration_client.post("/api/v1/chat/complete", json={
             "message": "Can you help me with functions?",
-            "session_id": session_id,
+            "session_id": response1.json()["data"]["session_id"],
             "context": {},
             "constraints": {}
         })

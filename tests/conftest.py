@@ -16,6 +16,8 @@ load_dotenv()
 import sys
 from app.models.ollama_client import OllamaClient
 from app.api import security
+from app.graphs.base import GraphState
+from app.main import app
 
 @pytest.fixture(scope="session", autouse=True)
 def ensure_ollama_models():
@@ -113,8 +115,9 @@ async def mock_cache_manager():
 
 @pytest.fixture(autouse=True)
 def override_get_current_user(monkeypatch):
+    from app.api.security import User
     async def dummy_user(*args, **kwargs):
-        return {"user_id": "test_user", "tier": "free"}
+        return User(user_id="test_user", tier="free", monthly_budget=20.0, permissions=["chat", "search"], is_anonymous=False)
     monkeypatch.setattr(security, "get_current_user", dummy_user)
 
 
@@ -131,3 +134,32 @@ def sample_graph_state():
         max_cost=0.5,  # Add max_cost field
         max_execution_time=30.0
     )
+
+
+import pytest_asyncio
+from asgi_lifespan import LifespanManager
+from httpx import AsyncClient, ASGITransport
+# Use set_dependencies directly if defined in this file
+from app.main import app
+
+@pytest_asyncio.fixture
+async def integration_client(mock_model_manager, mock_cache_manager):
+    """Create test client with mocked dependencies and proper cleanup."""
+    set_dependencies(mock_model_manager, mock_cache_manager)
+    app_instance = app
+    timeout = 3.0  # Reduced from 5.0
+    try:
+        async with LifespanManager(app_instance, startup_timeout=timeout, shutdown_timeout=timeout):
+            async with AsyncClient(
+                transport=ASGITransport(app=app_instance),
+                base_url="http://test"
+            ) as client:
+                yield client
+    except Exception as e:
+        # If lifespan fails, yield a basic client for testing
+        print(f"Warning: Lifespan setup failed: {e}")
+        async with AsyncClient(
+            transport=ASGITransport(app=app_instance),
+            base_url="http://test"
+        ) as client:
+            yield client

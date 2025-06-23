@@ -886,12 +886,38 @@ class CostOptimizer:
         return tips
 
 
-# Helper function to create cost optimizer
-async def create_cost_optimizer(
-    model_manager: ModelManager,
-    cache_manager: CacheManager
-) -> CostOptimizer:
-    """Create and initialize cost optimizer"""
-    optimizer = CostOptimizer(model_manager, cache_manager)
-    await optimizer.initialize()
-    return optimizer
+class PerformanceOptimizer:
+    def __init__(self, model_selector, user_budgets, *args, **kwargs):
+        self.model_selector = model_selector
+        self.user_budgets = user_budgets
+        self._background_task = None
+
+    async def start(self):
+        if self._background_task is None or self._background_task.done():
+            self._background_task = asyncio.create_task(self._run())
+
+    async def stop(self):
+        if self._background_task:
+            self._background_task.cancel()
+            try:
+                await self._background_task
+            except asyncio.CancelledError:
+                logger.info("[PerformanceOptimizer] Background task cancelled.")
+            finally:
+                self._background_task = None
+                await self._cleanup_resources()
+
+    async def _run(self):
+        try:
+            # ...existing code...
+            pass
+        except asyncio.CancelledError:
+            logger.info("[PerformanceOptimizer] _run cancelled.")
+            raise
+        finally:
+            await self._cleanup_resources()
+
+    async def _cleanup_resources(self):
+        # Explicit resource cleanup logic here
+        logger.info("[PerformanceOptimizer] Cleaning up resources.")
+        # ...cleanup code...

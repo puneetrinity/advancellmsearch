@@ -14,7 +14,7 @@ sys.path.insert(0, str(project_root))
 import asyncio
 import time
 from contextlib import asynccontextmanager
-from typing import Dict, Any
+from typing import Dict, Any, AsyncGenerator
 from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException
@@ -59,14 +59,10 @@ class SearchSystemWrapper:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Application lifespan management.
-    Handles startup and shutdown procedures for the standardized architecture.
-    """
-    # Startup
-    logger.info("🚀 Starting AI Search System with Standardized Providers")
-    
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """App startup/shutdown with logging and state attachment."""
+    logger.info("[LIFESPAN] Starting up...")
+    app_state = {}
     try:
         # Initialize logging
         setup_logging(
@@ -77,14 +73,14 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Logging system initialized")
         
         # Initialize model manager
-        logger.info("🧠 Initializing model manager...")
+        logger.info("[LIFESPAN] Initializing model manager...")
         model_manager = ModelManager(settings.ollama_host)
         await model_manager.initialize()
         app_state["model_manager"] = model_manager
         logger.info("✅ Model manager initialized")
         
         # Initialize cache manager
-        logger.info("💾 Initializing cache manager...")
+        logger.info("[LIFESPAN] Initializing cache manager...")
         try:
             cache_manager = CacheManager(settings.redis_url, settings.redis_max_connections)
             await cache_manager.initialize()
@@ -96,13 +92,13 @@ async def lifespan(app: FastAPI):
             app_state["cache_manager"] = None
         
         # Initialize chat graph
-        logger.info("🔄 Initializing chat graph...")
+        logger.info("[LIFESPAN] Initializing chat graph...")
         chat_graph = ChatGraph(model_manager, app_state["cache_manager"])
         app_state["chat_graph"] = chat_graph
         logger.info("✅ Chat graph initialized")
         
         # Initialize search graph with standardized providers
-        logger.info("🔍 Initializing search graph with Brave + ScrapingBee...")
+        logger.info("[LIFESPAN] Initializing search graph with Brave + ScrapingBee...")
         search_graph = SearchGraph(model_manager, app_state["cache_manager"])
         app_state["search_graph"] = search_graph
         logger.info("✅ Search graph initialized")
@@ -153,41 +149,15 @@ async def lifespan(app: FastAPI):
         logger.info(f"📊 Components initialized: {len(app_state)} components")
         logger.info(f"🏗️  Architecture: Standardized Providers (Brave + ScrapingBee)")
         
+        # Attach state to app
+        app.state.app_state = app_state
+        
+        logger.info("[LIFESPAN] Startup complete.")
         yield
-        
-    except Exception as e:
-        logger.error(f"💥 Startup failed: {e}", exc_info=True)
-        raise
-    
-    # Shutdown
-    logger.info("🛑 Shutting down AI Search System...")
-    
-    try:
-        # Cleanup search graph (and its providers)
-        if "search_graph" in app_state:
-            try:
-                await app_state["search_graph"].cleanup()
-                logger.info("✅ Search graph and providers cleaned up")
-            except Exception as e:
-                logger.warning(f"⚠️  Search graph cleanup error: {e}")
-        
-        # Cleanup model manager
-        if "model_manager" in app_state:
-            await app_state["model_manager"].cleanup()
-            logger.info("✅ Model manager cleaned up")
-        
-        # Cleanup cache manager
-        if "cache_manager" in app_state and app_state["cache_manager"]:
-            try:
-                await app_state["cache_manager"].close()
-                logger.info("✅ Cache manager cleaned up")
-            except Exception as e:
-                logger.warning(f"⚠️  Cache cleanup error: {e}")
-        
-        logger.info("✅ AI Search System shutdown completed")
-        
-    except Exception as e:
-        logger.error(f"Error during shutdown: {e}")
+    finally:
+        logger.info("[LIFESPAN] Shutting down...")
+        await shutdown_resources(app_state)
+        logger.info("[LIFESPAN] Shutdown complete.")
 
 
 # Create FastAPI application
