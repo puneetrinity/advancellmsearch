@@ -1,4 +1,13 @@
-### ⭐ **Phase 5 - Next-Gen Intelligence (Future)**
+AI Search System 🚀
+Neural Search Architecture - API-First Intelligence Platform
+Revolutionary AI search system where intelligence lives in APIs, not interfaces. Built with LangGraph orchestration, local-first processing via Ollama, and dual-layer metadata infrastructure for cost-efficient, intelligent search capabilities.
+🎯 Core Philosophy
+
+LLMs are workers, not rulers - Treat models as interchangeable graph nodes
+LangGraph is the conductor - Orchestrates intelligent workflows through smart routing
+APIs are the intelligence layer - Chat is just one interface consuming smart APIs
+85% local inference - Cost-efficient processing via Ollama with API fallbacks
+Metadata-driven learning - Continuous optimization through pattern recognition### ⭐ **Phase 5 - Next-Gen Intelligence (Future)**
 - 🎯 **Advanced Intelligence** - Multi-modal support and custom model fine-tuning
 - 🧠 **Neural Optimization** - Self-improving routing algorithms
 - 🌍 **Global Scale** - Multi-region deployment with edge computing
