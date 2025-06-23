@@ -1,0 +1,27 @@
+Server Side Public License (SSPL) v1
+Copyright (C) 2025 Puneet Trinity
+
+This program is free software: you can use, modify, and distribute it under the terms of the Server Side Public License, version 1, as published by MongoDB, Inc.
+
+This license grants you the right to use, copy, modify, and redistribute the software, with the following conditions:
+
+If you make the functionality of this software or a modified version available to third parties as a service, you must make the Service Source Code available under this license. "Service Source Code" means the source code of all programs that you use to make the service available, including, without limitation:
+
+- management software,
+- user interfaces,
+- APIs,
+- configuration files,
+- scripts,
+- infrastructure-as-code templates, and
+- monitoring software.
+
+This requirement applies whether or not the service includes any modifications to this program.
+
+You may not sublicense this program. This license does not grant permission to use the trade names, trademarks, service marks, or product names of the licensor, except as required for describing the origin of the software.
+
+You may not remove or alter any license notices in the source files.
+
+For the full terms, see:  
+https://www.mongodb.com/licensing/server-side-public-license
+
+The Server Side Public License (SSPL) is not approved by the Open Source Initiative.
