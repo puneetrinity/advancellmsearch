@@ -2,10 +2,12 @@
 Fixed integration tests that match the actual API endpoints and schemas
 """
 
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 from fastapi.testclient import TestClient
+
 from app.main import app, app_state  # Import your actual app
-from unittest.mock import Mock, AsyncMock
 
 # Create test client with the real app
 client = TestClient(app)
@@ -16,30 +18,53 @@ def mock_app_components(monkeypatch):
     """Mock required components for testing"""
     # Mock model manager
     mock_model_manager = Mock()
-    mock_model_manager.get_model_stats.return_value = {"total_models": 1, "loaded_models": 1}
-    # Mock cache manager  
+    mock_model_manager.get_model_stats.return_value = {
+        "total_models": 1,
+        "loaded_models": 1,
+    }
+    # Mock cache manager
     mock_cache_manager = Mock()
     # Mock chat graph
     mock_chat_graph = Mock()
-    mock_chat_graph.execute = AsyncMock(return_value=Mock(final_response="Test response", conversation_history=[], sources_consulted=[], citations=[], warnings=[], costs_incurred={}, models_used=set(), execution_path=[], escalation_reason=None, errors=None, intermediate_results={}, get_avg_confidence=lambda: 1.0, calculate_total_cost=lambda: 0.0))
+    mock_chat_graph.execute = AsyncMock(
+        return_value=Mock(
+            final_response="Test response",
+            conversation_history=[],
+            sources_consulted=[],
+            citations=[],
+            warnings=[],
+            costs_incurred={},
+            models_used=set(),
+            execution_path=[],
+            escalation_reason=None,
+            errors=None,
+            intermediate_results={},
+            get_avg_confidence=lambda: 1.0,
+            calculate_total_cost=lambda: 0.0,
+        )
+    )
     # Mock search graph
     mock_search_graph = Mock()
     mock_search_graph.execute = AsyncMock(return_value=Mock())
     # Mock search system
     mock_search_system = Mock()
-    mock_search_system.execute_optimized_search = AsyncMock(return_value={
-        "response": "Test search response",
-        "citations": [],
-        "metadata": {"execution_time": 0.01, "total_cost": 0.0}
-    })
+    mock_search_system.execute_optimized_search = AsyncMock(
+        return_value={
+            "response": "Test search response",
+            "citations": [],
+            "metadata": {"execution_time": 0.01, "total_cost": 0.0},
+        }
+    )
     # Patch app_state
-    app_state.update({
-        "model_manager": mock_model_manager,
-        "cache_manager": mock_cache_manager, 
-        "chat_graph": mock_chat_graph,
-        "search_graph": mock_search_graph,
-        "search_system": mock_search_system
-    })
+    app_state.update(
+        {
+            "model_manager": mock_model_manager,
+            "cache_manager": mock_cache_manager,
+            "chat_graph": mock_chat_graph,
+            "search_graph": mock_search_graph,
+            "search_system": mock_search_system,
+        }
+    )
     yield
     # Cleanup
     app_state.clear()
@@ -80,7 +105,7 @@ def test_search_basic_corrected():
         "query": "test query",
         "max_results": 3,
         "search_type": "web",
-        "include_summary": True
+        "include_summary": True,
     }
     resp = client.post("/api/v1/search/basic", json=payload)
     assert resp.status_code in [200, 422], f"Got {resp.status_code}: {resp.text}"
@@ -98,10 +123,7 @@ def test_chat_corrected():
         "message": "Hello, how are you?",
         "session_id": "test_session_123",
         "context": {},
-        "constraints": {
-            "max_cost": 1.0,
-            "quality_requirement": "standard"
-        }
+        "constraints": {"max_cost": 1.0, "quality_requirement": "standard"},
     }
     resp = client.post("/api/v1/chat/complete", json=payload)
     if resp.status_code == 500:
@@ -124,7 +146,9 @@ def test_search_test_endpoint():
     resp = client.post("/api/v1/search/test", json=payload)
     assert resp.status_code == 200
     data = resp.json()
-    assert data.get("status") == "success" or "results" in data or "mock_results" in data
+    assert (
+        data.get("status") == "success" or "results" in data or "mock_results" in data
+    )
     print(f"✅ Search test passed: {data}")
 
 
@@ -156,10 +180,10 @@ async def test_chat_streaming():
     """Test streaming chat if supported"""
     payload = {
         "message": "Tell me about AI",
-        "session_id": "stream_test_123", 
+        "session_id": "stream_test_123",
         "context": {},
         "constraints": {"max_cost": 1.0},
-        "stream": True
+        "stream": True,
     }
     resp = client.post("/api/v1/chat/complete", json=payload)
     if resp.status_code == 500:
@@ -179,7 +203,7 @@ def test_error_handling():
         "message": "",
         "session_id": "error_test",
         "context": {},
-        "constraints": {}
+        "constraints": {},
     }
     resp = client.post("/api/v1/chat/complete", json=payload)
     assert resp.status_code == 422, f"Expected 422, got {resp.status_code}: {resp.text}"

@@ -6,10 +6,10 @@ Foundation for all graph implementations - Complete fixed version
 
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime
-from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
+from typing import Any, Dict, List, Optional
 
 import structlog
 from langgraph.graph import StateGraph
@@ -28,6 +28,7 @@ logger = structlog.get_logger(__name__)
 
 class GraphType(Enum):
     """Graph type enumeration"""
+
     CHAT = "chat"
     SEARCH = "search"
     ANALYSIS = "analysis"
@@ -37,6 +38,7 @@ class GraphType(Enum):
 
 class NodeType(Enum):
     """Node type enumeration"""
+
     PROCESSING = "processing"
     DECISION = "decision"
     IO = "io"
@@ -45,6 +47,7 @@ class NodeType(Enum):
 
 class NodeResult(BaseModel):
     """Standard result format for graph nodes"""
+
     success: bool
     data: Dict[str, Any] = {}
     confidence: float = 0.0
@@ -58,6 +61,7 @@ class NodeResult(BaseModel):
 @dataclass
 class GraphState:
     """Shared state across all graphs"""
+
     # Core request data
     query_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     correlation_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -105,7 +109,7 @@ class GraphState:
         # Store complete result with timestamp
         self.node_results[step_name] = {
             "result": result,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
         }
         if result.error:
             self.errors.append(f"{step_name}: {result.error}")
@@ -124,7 +128,9 @@ class GraphState:
     def is_within_budget(self, additional_cost: float = 0.0) -> bool:
         """Check if we're within budget constraints."""
         total_cost = self.calculate_total_cost() + additional_cost
-        max_allowed = self.max_cost if self.max_cost is not None else self.cost_budget_remaining
+        max_allowed = (
+            self.max_cost if self.max_cost is not None else self.cost_budget_remaining
+        )
         return total_cost <= max_allowed
 
     def calculate_total_cost(self) -> float:
@@ -144,6 +150,7 @@ class GraphState:
 
 class BaseGraphNode(ABC):
     """Base class for all graph nodes"""
+
     def __init__(self, name: str, node_type: str = "processing"):
         self.name = name
         self.node_type = node_type
@@ -159,9 +166,7 @@ class BaseGraphNode(ABC):
         start_time = datetime.now()
         try:
             self.logger.info(
-                "Node execution started",
-                node=self.name,
-                query_id=state.query_id
+                "Node execution started", node=self.name, query_id=state.query_id
             )
             # Execute the node logic
             result = await self.execute(state, **kwargs)
@@ -179,7 +184,7 @@ class BaseGraphNode(ABC):
                 success=result.success,
                 confidence=result.confidence,
                 execution_time=execution_time,
-                cost=result.cost
+                cost=result.cost,
             )
             return state
         except Exception as e:
@@ -187,9 +192,7 @@ class BaseGraphNode(ABC):
             error_msg = f"Node {self.name} failed: {str(e)}"
             # Create error result
             error_result = NodeResult(
-                success=False,
-                error=error_msg,
-                execution_time=execution_time
+                success=False, error=error_msg, execution_time=execution_time
             )
             state.add_execution_step(self.name, error_result)
             self.logger.error(
@@ -198,13 +201,14 @@ class BaseGraphNode(ABC):
                 query_id=state.query_id,
                 error=str(e),
                 execution_time=execution_time,
-                exc_info=e
+                exc_info=e,
             )
             return state
 
 
 class BaseGraph(ABC):
     """Base class for all graph implementations"""
+
     def __init__(self, graph_type: GraphType, name: str):
         self.graph_type = graph_type
         self.name = name
@@ -254,45 +258,45 @@ class BaseGraph(ABC):
                         else:
                             updated_mapping[condition] = target
                     self.graph.add_conditional_edges(
-                        from_node,
-                        condition_func,
-                        updated_mapping
+                        from_node, condition_func, updated_mapping
                     )
             # Register 'end' as a terminal node for LangGraph compatibility
             try:
-                if hasattr(self.graph, 'add_terminal_node'):
+                if hasattr(self.graph, "add_terminal_node"):
                     self.graph.add_terminal_node(END)
                     self.logger.debug("Added terminal node using add_terminal_node()")
-                elif hasattr(self.graph, 'set_terminal_nodes'):
+                elif hasattr(self.graph, "set_terminal_nodes"):
                     self.graph.set_terminal_nodes([END])
                     self.logger.debug("Added terminal node using set_terminal_nodes()")
-                elif hasattr(self.graph, 'set_finish_point'):
+                elif hasattr(self.graph, "set_finish_point"):
                     self.graph.set_finish_point(END)
                     self.logger.debug("Added terminal node using set_finish_point()")
                 else:
                     self.logger.warning(
                         "No terminal node registration method found. "
-                        "This may cause graph execution issues.")
+                        "This may cause graph execution issues."
+                    )
             except Exception as terminal_error:
                 self.logger.warning(
                     "Failed to register terminal node",
                     error=str(terminal_error),
-                    exc_info=terminal_error
+                    exc_info=terminal_error,
                 )
             # Set 'start' as the entry point for LangGraph compatibility
             try:
-                if hasattr(self.graph, 'set_entry_point'):
+                if hasattr(self.graph, "set_entry_point"):
                     self.graph.set_entry_point(START)
                     self.logger.debug("Set entry point using set_entry_point()")
                 else:
                     self.logger.warning(
                         "No entry point registration method found. "
-                        "This may cause graph execution issues.")
+                        "This may cause graph execution issues."
+                    )
             except Exception as entry_error:
                 self.logger.warning(
                     "Failed to register entry point",
                     error=str(entry_error),
-                    exc_info=entry_error
+                    exc_info=entry_error,
                 )
             # Compile graph
             self.graph = self.graph.compile()
@@ -300,14 +304,14 @@ class BaseGraph(ABC):
                 "Graph built successfully",
                 graph_type=self.graph_type.value,
                 nodes=list(self.nodes.keys()),
-                entrypoint=start_target
+                entrypoint=start_target,
             )
         except Exception as e:
             self.logger.error(
                 "Failed to build graph",
                 graph_type=self.graph_type.value,
                 error=str(e),
-                exc_info=e
+                exc_info=e,
             )
             raise
 
@@ -316,13 +320,11 @@ class BaseGraph(ABC):
         if not self.graph:
             raise RuntimeError(f"Graph {self.name} not built. Call build() first.")
         import asyncio
+
         try:
-            result = await asyncio.wait_for(
-                self.graph.ainvoke(state),
-                timeout=30.0
-            )
+            result = await asyncio.wait_for(self.graph.ainvoke(state), timeout=30.0)
             # Handle LangGraph result - it might be a different type
-            if hasattr(result, '__dict__'):
+            if hasattr(result, "__dict__"):
                 for key, value in result.__dict__.items():
                     if hasattr(state, key):
                         setattr(state, key, value)
@@ -355,28 +357,28 @@ class BaseGraph(ABC):
 
 class RoutingCondition:
     """Helper class for routing conditions in graphs"""
-    
+
     @staticmethod
     def should_continue(state: GraphState) -> str:
         """Basic continue condition"""
         if state.errors:
             return "error_handler"
         return "continue"
-    
+
     @staticmethod
     def check_budget(state: GraphState) -> str:
         """Check if budget allows continuation"""
         if state.calculate_total_cost() >= state.cost_budget_remaining:
             return "budget_exceeded"
         return "continue"
-    
+
     @staticmethod
     def check_time_limit(state: GraphState) -> str:
         """Check if time limit allows continuation"""
         if state.calculate_total_time() >= state.max_execution_time:
             return "timeout"
         return "continue"
-    
+
     @staticmethod
     def check_confidence(state: GraphState, threshold: float = 0.7) -> str:
         """Check if confidence is sufficient"""
@@ -387,34 +389,35 @@ class RoutingCondition:
 
 # Common node implementations
 
+
 class StartNode(BaseGraphNode):
     """Standard start node for all graphs"""
-    
+
     def __init__(self):
         super().__init__("start", "control")
-    
+
     async def execute(self, state: GraphState, **kwargs) -> NodeResult:
         """Initialize the graph execution"""
         return NodeResult(
             success=True,
             confidence=1.0,
             data={"message": "Graph execution started"},
-            metadata={"timestamp": datetime.now().isoformat()}
+            metadata={"timestamp": datetime.now().isoformat()},
         )
 
 
 class EndNode(BaseGraphNode):
     """Standard end node for all graphs"""
-    
+
     def __init__(self):
         super().__init__("end", "control")
-    
+
     async def execute(self, state: GraphState, **kwargs) -> NodeResult:
         """Finalize the graph execution"""
         total_time = state.calculate_total_time()
         total_cost = state.calculate_total_cost()
         avg_confidence = state.get_avg_confidence()
-        
+
         return NodeResult(
             success=True,
             confidence=1.0,
@@ -425,44 +428,49 @@ class EndNode(BaseGraphNode):
                     "avg_confidence": avg_confidence,
                     "steps_executed": len(state.execution_path),
                     "cache_hits": len(state.cache_hits),
-                    "errors": len(state.errors)
+                    "errors": len(state.errors),
                 }
             },
             metadata={
                 "completion_timestamp": datetime.now().isoformat(),
-                "execution_path": state.execution_path
-            }
+                "execution_path": state.execution_path,
+            },
         )
 
 
 class ErrorHandlerNode(BaseGraphNode):
     """Standard error handling node"""
-    
+
     def __init__(self):
         super().__init__("error_handler", "control")
-    
+
     async def execute(self, state: GraphState, **kwargs) -> NodeResult:
         """Handle errors gracefully"""
         error_count = len(state.errors)
-        
+
         # Log errors
         for error in state.errors:
             self.logger.error("Graph error", error=error, query_id=state.query_id)
-        
+
         # Attempt graceful degradation
-        fallback_response = "I encountered some issues processing your request. Please try again."
-        
+        fallback_response = (
+            "I encountered some issues processing your request. Please try again."
+        )
+
         if state.final_response:
             # We have partial results
-            fallback_response = state.final_response + "\n\n(Note: Some features may have experienced issues)"
-        
+            fallback_response = (
+                state.final_response
+                + "\n\n(Note: Some features may have experienced issues)"
+            )
+
         state.final_response = fallback_response
         state.response_metadata["error_recovery"] = True
         state.response_metadata["error_count"] = error_count
-        
+
         return NodeResult(
             success=True,  # Recovery successful
             confidence=0.3,  # Low confidence due to errors
             data={"recovery_attempted": True, "error_count": error_count},
-            metadata={"errors": state.errors}
+            metadata={"errors": state.errors},
         )

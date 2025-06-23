@@ -2,14 +2,16 @@
 """
 Standardized base provider for all search and scraping providers.
 """
-from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
-from dataclasses import dataclass, field
-import aiohttp
 import asyncio
-import time
 import logging
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any, Dict, Optional
+
+import aiohttp
+
 
 @dataclass
 class ProviderConfig:
@@ -21,6 +23,7 @@ class ProviderConfig:
     rate_limit_per_minute: int = 60
     additional_params: Dict[str, Any] = field(default_factory=dict)
 
+
 @dataclass
 class ProviderResult:
     success: bool
@@ -31,18 +34,28 @@ class ProviderResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
     provider_name: str = ""
 
+
 class ProviderError(Exception):
-    def __init__(self, message: str, provider: str, error_code: str = None, original_error: Exception = None):
+    def __init__(
+        self,
+        message: str,
+        provider: str,
+        error_code: str = None,
+        original_error: Exception = None,
+    ):
         self.message = message
         self.provider = provider
         self.error_code = error_code
         self.original_error = original_error
         super().__init__(f"[{provider}] {message}")
 
+
 class BaseProvider(ABC):
     def __init__(self, config: ProviderConfig, logger: Optional[logging.Logger] = None):
         self.config = config
-        self.logger = logger or logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
+        self.logger = logger or logging.getLogger(
+            f"{self.__class__.__module__}.{self.__class__.__name__}"
+        )
         self._session: Optional[aiohttp.ClientSession] = None
         self._initialized = False
         self._stats = {
@@ -50,7 +63,7 @@ class BaseProvider(ABC):
             "total_cost": 0.0,
             "total_execution_time": 0.0,
             "errors": 0,
-            "last_request": None
+            "last_request": None,
         }
 
     async def __aenter__(self):
@@ -91,14 +104,20 @@ class BaseProvider(ABC):
     def get_stats(self) -> Dict[str, Any]:
         stats = self._stats.copy()
         if stats["requests_made"] > 0:
-            stats["success_rate"] = ((stats["requests_made"] - stats["errors"]) / stats["requests_made"]) * 100
-            stats["avg_execution_time"] = stats["total_execution_time"] / stats["requests_made"]
+            stats["success_rate"] = (
+                (stats["requests_made"] - stats["errors"]) / stats["requests_made"]
+            ) * 100
+            stats["avg_execution_time"] = (
+                stats["total_execution_time"] / stats["requests_made"]
+            )
         else:
             stats["success_rate"] = 0.0
             stats["avg_execution_time"] = 0.0
         return stats
 
-    async def _execute_with_retry(self, operation_func, *args, **kwargs) -> ProviderResult:
+    async def _execute_with_retry(
+        self, operation_func, *args, **kwargs
+    ) -> ProviderResult:
         start_time = time.time()
         last_error = None
         for attempt in range(self.config.max_retries + 1):
@@ -111,7 +130,7 @@ class BaseProvider(ABC):
                         data=result,
                         execution_time=execution_time,
                         cost=self.config.cost_per_request,
-                        provider_name=self.get_provider_name()
+                        provider_name=self.get_provider_name(),
                     )
                 else:
                     result.execution_time = execution_time
@@ -127,16 +146,16 @@ class BaseProvider(ABC):
                     extra={
                         "provider": self.get_provider_name(),
                         "error": str(e),
-                        "attempt": attempt + 1
-                    }
+                        "attempt": attempt + 1,
+                    },
                 )
                 if attempt < self.config.max_retries:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
         execution_time = time.time() - start_time
         self._update_stats(execution_time, 0.0, False)
         raise ProviderError(
             message=f"Operation failed after {self.config.max_retries + 1} attempts: {str(last_error)}",
             provider=self.get_provider_name(),
             error_code="MAX_RETRIES_EXCEEDED",
-            original_error=last_error
+            original_error=last_error,
         )

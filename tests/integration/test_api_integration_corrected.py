@@ -3,45 +3,51 @@ CORRECTED Integration tests with proper request schemas and coroutine safety.
 This file replaces the previous integration tests with fixes for all identified issues.
 """
 
-import pytest
-import httpx
 import asyncio
 import time
+from unittest.mock import AsyncMock, Mock
+
+import httpx
+import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import Mock, AsyncMock
+
 from app.main import app, app_state
 
 # Sync client for basic endpoints
 client = TestClient(app)
 
+
 @pytest.fixture
 async def async_client():
     """Async client for async endpoints"""
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), 
-        base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         yield client
+
 
 @pytest.fixture(autouse=True)
 def setup_safe_app_components():
     """
     Setup proper mock components with coroutine safety.
     """
-    async def safe_search_execute(query, budget=2.0, quality="standard", max_results=10, **kwargs):
+
+    async def safe_search_execute(
+        query, budget=2.0, quality="standard", max_results=10, **kwargs
+    ):
         result = {
             "response": f"Test search response for: {query}",
             "citations": [
                 {"url": "https://example.com/1", "title": "Test Result 1"},
-                {"url": "https://example.com/2", "title": "Test Result 2"}
+                {"url": "https://example.com/2", "title": "Test Result 2"},
             ],
             "metadata": {
-                "execution_time": 0.01, 
+                "execution_time": 0.01,
                 "total_cost": 0.0,
                 "query_id": "test-query-123",
                 "confidence_score": 0.95,
-                "provider_used": "test_provider"
-            }
+                "provider_used": "test_provider",
+            },
         }
         assert not asyncio.iscoroutine(result), "Mock search result is a coroutine!"
         return result
@@ -69,13 +75,11 @@ def setup_safe_app_components():
     mock_model_manager.get_model_stats.return_value = {
         "total_models": 1,
         "loaded_models": 1,
-        "available_models": ["test_model"]
+        "available_models": ["test_model"],
     }
-    mock_model_manager.generate = AsyncMock(return_value=Mock(
-        success=True,
-        text="Test response",
-        cost=0.01
-    ))
+    mock_model_manager.generate = AsyncMock(
+        return_value=Mock(success=True, text="Test response", cost=0.01)
+    )
 
     mock_cache_manager = Mock()
     mock_cache_manager.get = AsyncMock(return_value=None)
@@ -88,24 +92,29 @@ def setup_safe_app_components():
     mock_chat_graph.execute = safe_chat_execute
     mock_chat_graph.get_performance_stats.return_value = {
         "executions": 1,
-        "avg_time": 1.0
+        "avg_time": 1.0,
     }
 
     mock_search_graph = Mock()
-    mock_search_graph.execute = AsyncMock(return_value=Mock(
-        results=[],
-        summary="Test summary",
-        total_results=0,
-        search_time=0.1,
-        sources_consulted=[]
-    ))
+    mock_search_graph.execute = AsyncMock(
+        return_value=Mock(
+            results=[],
+            summary="Test summary",
+            total_results=0,
+            search_time=0.1,
+            sources_consulted=[],
+        )
+    )
 
     async def verify_mock_safety():
         print("\n🔍 VERIFYING MOCK SAFETY:")
         search_result = await mock_search_system.execute_optimized_search("test query")
         print(f"🔍 Search mock result type: {type(search_result)}")
-        print(f"🔍 Search mock is_coroutine: {asyncio.iscoroutine(search_result)}")
-        assert not asyncio.iscoroutine(search_result), "Search mock returning coroutine!"
+        print(f"🔍 Search mock is_coroutine: "
+            "{asyncio.iscoroutine(search_result)}")
+        assert not asyncio.iscoroutine(
+            search_result
+        ), "Search mock returning coroutine!"
         chat_result = await mock_chat_graph.execute(Mock())
         print(f"🔍 Chat mock result type: {type(chat_result)}")
         print(f"🔍 Chat mock is_coroutine: {asyncio.iscoroutine(chat_result)}")
@@ -119,27 +128,35 @@ def setup_safe_app_components():
 
     try:
         from app.api.chat import set_dependencies as set_chat_dependencies
-        set_chat_dependencies(mock_model_manager, mock_cache_manager, mock_chat_graph)
+
+        set_chat_dependencies(
+            mock_model_manager,
+            mock_cache_manager,
+            mock_chat_graph
+        )
     except ImportError:
         pass
     try:
         from app.api.search import set_dependencies as set_search_dependencies
-        set_search_dependencies(mock_model_manager, mock_cache_manager, mock_search_graph)
+
+        set_search_dependencies(
+            mock_model_manager, mock_cache_manager, mock_search_graph
+        )
     except ImportError:
         pass
-    app_state.update({
-        "model_manager": mock_model_manager,
-        "cache_manager": mock_cache_manager, 
-        "chat_graph": mock_chat_graph,
-        "search_graph": mock_search_graph,
-        "search_system": mock_search_system,
-        "api_key_status": {
-            "brave_search": True,
-            "scrapingbee": True
-        },
-        "startup_time": time.time()
-    })
+    app_state.update(
+        {
+            "model_manager": mock_model_manager,
+            "cache_manager": mock_cache_manager,
+            "chat_graph": mock_chat_graph,
+            "search_graph": mock_search_graph,
+            "search_system": mock_search_system,
+            "api_key_status": {"brave_search": True, "scrapingbee": True},
+            "startup_time": time.time(),
+        }
+    )
     yield
     app_state.clear()
+
 
 # ...existing test code from your provided file...
