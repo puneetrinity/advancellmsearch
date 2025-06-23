@@ -245,3 +245,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 **Built with ❤️ for intelligent, cost-effective AI search**
+
+## License
+
+This project is licensed under the Server Side Public License (SSPL) v1.  
+See the LICENSE file for details.
